@@ -1,0 +1,49 @@
+﻿{
+    "version":  "2.0",
+    "_说明":  "AMD CoGPU 运行时清单（作者维护）。每个组件可各自指向自己的上游仓库；安装器逐个下载、校验、解压，并检查【我们代理真正需要的文件】是否齐备。终端用户不需要改这里。",
+    "author":  "AMD CoGPU",
+    "components":  [
+                       {
+                           "id":  "nr-runtime",
+                           "title":  "神经降噪运行时（mochizuki0323）",
+                           "author":  "mochizuki0323",
+                           "license":  "MIT",
+                           "licenseFile":  "dlssnr-amd\\LICENSE-DLSSNR-AMD.txt",
+                           "homepage":  "https://github.com/mochizuki0323/DLSSNR-AMD",
+                           "source":  "upstream",
+                           "url":  "https://github.com/mochizuki0323/DLSSNR-AMD/releases/download/v0.0.7/DLSSNR-AMD-Vulkan-Windows-0.0.7-preview-x86_64.zip",
+                           "mirrors":  [
+                                           "https://ghproxy.net/https://github.com/mochizuki0323/DLSSNR-AMD/releases/download/v0.0.7/DLSSNR-AMD-Vulkan-Windows-0.0.7-preview-x86_64.zip"
+                                       ],
+                           "size":  197734206,
+                           "sha256":  "bffe74aee8c953814662f0942bd7116114dbde4a3f2f9e1d3a454e64ab2cc675",
+                           "type":  "zip",
+                           "expect":  [
+                                          "LmxxfNrRuntime.dll",
+                                          "LmxxfNrRuntime.pak",
+                                          "dlssnr-amd",
+                                          "licenses\\lmxxf_LICENSE.txt",
+                                          "licenses\\AMDNR_RDNA3_BACKEND.txt"
+                                      ],
+                           "proxyRequires":  [
+                                                 "LmxxfNrRuntime.dll",
+                                                 "LmxxfNrRuntime.pak"
+                                             ],
+                           "_兼容性说明":  "我们的 libxess.dll 按 LmxxfNrRuntime.* 加载运行时（lmxxf 血统的 ABI 外壳）。上游 DLSSNR-AMD 的 Windows 包提供 dlssnr-amd.asi 与 CC_* 模型，不含这两个文件名。安装器会在解压后检查 proxyRequires：不齐备就明确报『与代理不兼容』，而不是假装装好了。",
+                           "credits":  [
+                                           "Kien (lmxxf) — network / weights / HIP kernels — MIT",
+                                           "3zwr1 (AMDNR) — RDNA3 (gfx11) backend — MIT",
+                                           "mochizuki0323 — dlssnr-amd models — MIT"
+                                       ],
+                           "redistribution":  "原样分发，不改动 pak 内声明；随包附 licenses\\ 下 MIT 原文与包内声明照录。声明为已认证，被改动过的 pak 会被运行时拒绝。",
+                           "selfHosted":  {
+                                              "url":  "https://github.com/kagennotsuki/AMD-CoGPU/releases/download/runtime-v1.0/runtime.zip",
+                                              "mirrors":  [
+                                                              "https://ghproxy.net/https://github.com/kagennotsuki/AMD-CoGPU/releases/download/runtime-v1.0/runtime.zip"
+                                                          ],
+                                              "size":  801163330,
+                                              "sha256":  "5FA041257D46AC1AACCDF0CFB9E3B467B929B09B466779DD16B8EC83C7830D47"
+                                          }
+                       }
+                   ]
+}

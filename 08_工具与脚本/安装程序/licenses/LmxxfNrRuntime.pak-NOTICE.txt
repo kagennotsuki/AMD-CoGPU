@@ -1,0 +1,21 @@
+﻿LmxxfNrRuntime.pak · 包内声明（原文照录，未做任何修改）
+============================================================
+
+以下文字来自 LmxxfNrRuntime.pak 二进制头部的明文声明区：
+
+  LmxxfNrRuntime.pak - AMDNR, DLSS 5 neural rendering on AMD GPUs
+  lmxxf's network, weights and kernels: Copyright (c) 2026 Kien (lmxxf), MIT licence
+  https://github.com/lmxxf/dlss5-on-amd-9070xt-porting
+  RDNA 3 (gfx11) backend: AMDNR - lmxxf RDNA 3 backend by 3zwr1 - https://github.com/3zwr1/AMD-NR---OptiScaler
+  Copyright (c) 2026 3zwr1 (AMDNR), MIT licence (Licenses\AMDNR_RDNA3_BACKEND.txt)
+  If you redistribute this file or anything taken from it, keep this notice and both credits.
+  This notice is authenticated: a pack whose notice was edited or removed is refused by the runtime.
+
+重要（摘自包内声明）：
+  · 若要再分发本文件或其中任何内容，必须保留上述声明与两条署名（Kien / lmxxf 与 3zwr1 / AMDNR）。
+  · 该声明是"已认证"的：被编辑或删除过声明的 pak 会被运行时直接拒绝。
+  ⇒ 本项目分发本 pak 时【原样分发、不做任何修改】，并随包附上：
+       licenses\lmxxf_LICENSE.txt          （Kien，MIT）
+       licenses\AMDNR_RDNA3_BACKEND.txt    （3zwr1，MIT）
+
+抽取时间：2026-10-29 22:53:41

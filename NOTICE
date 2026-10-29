@@ -1,0 +1,194 @@
+AMD CoGPU - NOTICE
+==================
+
+Copyright (c) 2026 kagennotsuki
+Project:  <https://github.com/kagennotsuki/AMD-CoGPU>
+Contact:  https://github.com/kagennotsuki/AMD-CoGPU/issues
+Docs:     许可证见本目录 LICENSE（GPL-3.0）与 LICENSE-DOCS（CC BY-NC-SA 4.0）
+
+AMD CoGPU runs neural rendering across two AMD GPUs: the game renders on one
+adapter, the neural network runs on the other, and the composed frame is
+presented from the second one.
+
+本项目是独立实现，不是 OptiScaler、AMDNR、MGPU Bridge 或任何其他项目
+的分支。未获 AMD、NVIDIA、Intel、Capcom 或任何游戏发行商的授权或背书。
+"AMD"、"Radeon"、"NVIDIA"、"DLSS"、"XeSS" 等名称归其各自权利人所有。
+
+Not affiliated with or endorsed by AMD, NVIDIA, Intel or any game publisher.
+
+
+1. 本通知覆盖的作品（本项目自己写的）
+------------------------------------
+
+The following is AMD CoGPU's own work, Copyright (c) 2026 kagennotsuki:
+
+  * 跨卡桥（cross-adapter bridge）：捕获、CPU 中转传输层、
+    跨适配器围栏规避策略、以及实测的带宽判据。
+  * 槽位队列（Slot Ring）：帧-答案身份校验与延迟配对模型，
+    含 K 槽约束、外部 fence 编排、失败形态。
+  * libxess.dll 代理：XeSS ABI 转发、跨卡管线编排、残差合成、
+    时域稳定与运动矢量重投影、4K 后置出画路径。
+  * NR 消费端适配层：尺寸协商、FrameInfo 扩展字段、
+    模型热切换的会话重建编排。
+  * 游戏内菜单与参数面：全部 UI 布局、文本与接线。
+  * 安装程序（8 步向导、清单校验、selfHosted 优先的组件解析）。
+  * 帧错配定位法（跑马灯帧标记与三横条判读）与六项检查验证法。
+  * 全部文档、图表、实测数据与方法论。
+
+以上受 GPL-3.0 约束，附加条款见第 3、4 节。
+
+
+2. 署名放在哪里
+----------------
+
+  * 本文件，以及仓库根的 LICENSE 与 LICENSE-DOCS。
+  * 本仓库所有项目自己编写的源码文件头的版权行。
+  * README 的 License 与 Credits 小节。
+  * 二进制产物的版本资源（Windows 属性 > 详细信息：公司/版权/版本）。
+  * 游戏内菜单的标题行与署名行。
+
+About 小节若存在，同此。
+
+
+3. 附加条款（GNU GPL v3, section 7(b)）
+---------------------------------------
+
+For the material that AMD CoGPU added to this work, the following additional
+term applies, as permitted by section 7(b) of the GNU General Public License
+version 3:
+
+  Any copy, fork, port or derivative work that contains AMD CoGPU material,
+  in source or binary form, must preserve this notice and the copyright
+  lines in AMD CoGPU's source files, and must credit
+
+      AMD CoGPU by kagennotsuki - <https://github.com/kagennotsuki/AMD-CoGPU>
+
+  in its README (or equivalent documentation) and wherever it shows credits
+  or an About section.
+
+  任何包含本项目材料的复制、分叉、移植或衍生作品，无论源码或二进制形式，
+  都必须保留本通知与本项目源码文件中的版权行，并在其 README（或同等文档）
+  以及任何显示致谢或"关于"的位置，署名上方的项目名与链接。
+
+
+4. 附加条款（GNU GPL v3, section 7(c) 与 (d)/(e)）
+---------------------------------------------------
+
+  (c) you may not present this work, or a modified copy of it, as your own
+      work; modified versions must be clearly marked as changed;
+
+  (d) no rights are granted to the AMD CoGPU name or logo; other projects
+      may not use them;
+
+  不得将本项目或其修改版当成自己的原创作品；修改版必须明确标注"已改动"。
+  不授予本项目名称与标识的任何权利；其他项目不得使用。
+
+
+5. 本通知不覆盖的作品（权利归各自作者）
+---------------------------------------
+
+AMD CoGPU claims no copyright over the work of others. They keep their
+rights and licences:
+
+  * ImGui - Omar Cornut and contributors (MIT). third_party/imgui-*.
+  * MGPU Bridge - Marcelo Guibout (MIT). 本项目的跨卡骨架参考其公开做法。
+  * DLSSNR-AMD - mochizuki0323 (MIT), https://github.com/mochizuki0323/DLSSNR-AMD
+    - NR 运行时与模型资产的来源。必须随附其 MIT 许可原文。
+  * lmxxf - Kien (MIT), https://github.com/lmxxf/dlss5-on-amd-9070xt-porting
+    - lmxxf 网络移植与 kernels。
+  * danielblnc - DLSS-NR on AMD, https://github.com/danielblnc/DLSS-NR-on-AMD
+    (All rights reserved, 自定义非商业许可) - 闭源运行时。本项目不分发其任何
+    二进制或权重，也不在其基础上制作衍生作品；仅在用户已自行安装时检测存在。
+  * OptiScaler contributors 与 3zwr1 (AMDNR) (GPL-3.0) - 本项目的架构选型、
+    参数语义与 ini 键名参考其公开文档、配置注释与运行日志；未包含其源代码。
+    见第 7 节。
+  * AMD FidelityFX - AMD (MIT)。
+  * Intel XeSS - Intel，按其自身许可使用；本项目不随包分发 Intel 的原始 DLL。
+  * NVIDIA DLSS 与其网络设计、权重 - NVIDIA 所有。本项目不分发任何
+    NVIDIA 权重，也不分发由 NVIDIA 权重生成的模型资产。
+  * Microsoft DirectX / Detours 等 - 按其自身许可。
+
+Fetched by the installer from the authors' own releases, NOT in this repo:
+
+  * NR 运行时与模型资产（LmxxfNrRuntime.dll / .pak、dlssnr-amd\），
+    由安装程序从上游官方 release 获取并校验 SHA-256。
+
+
+6. 源码与分发
+-------------
+
+  源码位于本仓库。以下内容不进仓库，只在 Releases 附件或由安装程序在
+  用户机上从上游获取：
+
+    * 编译产物：*.dll / *.exe / *.pdb / *.lib / *.exp / *.obj
+    * 模型与资产：*.pak / *.bin / *.hsaco
+    * 厂商二进制：libxess*.dll、nvngx_*.dll、amd_fidelityfx_*.dll、dxgi.dll
+    * 游戏文件、反编译产物、抓帧素材
+    * 本机日志与本机配置
+
+  这样做的目的不是隐藏源码（源码按 GPL-3.0 完全公开），而是：
+  一、避免把第三方或厂商的权利内容转由本项目分发；
+  二、避免把可执行成品变成一次 git clone 就能拿走的免费品。
+
+  本项目附带 GPL-3.0 要求的完整对应源码；Building 说明见 README。
+
+
+7. 与 OptiScaler / AMDNR 的关系
+-------------------------------
+
+本项目在设计上参考了 OptiScaler 与 AMDNR（GPL-3.0）以及 MGPU Bridge（MIT）
+的公开做法、参数语义与 ini 键名（例如残差限幅/边缘保护/输出平滑的取值、
+换模型即重建会话的编排、[DlssNr] / Amd* 键的语义）。这些属于功能与思想，
+不受版权保护；本项目的实现为独立编写。
+
+上述声明基于以下可核查的事实：
+
+  (a) 本仓库全部源码文件的注释均为中文撰写，不含英文注释块；
+      而 OptiScaler 与 AMDNR 的源码注释为英文。若存在成段复制，
+      英文注释会被一并带入。
+
+  (b) 本仓库不含 AMDNR 或 OptiScaler 的任何标识符、命名空间、
+      文件名或规则类命名（例如 NrLookRules、GraphicsSnapshot、
+      AmdBridge、RefinePass、AmdDeviceGate 等）。
+
+  (c) 本项目的注入点是 libxess.dll（XeSS ABI 转发），与上述项目使用的
+      dxgi.dll（DXGI / D3D 包装层）在注入点、结构与调用契约上无关。
+      二者能共存的唯一原因是它们挂在不同的模块上。
+
+  (d) 本项目对上述项目的引用全部出现在注释中，形式为"参考其做法"、
+      "与其实测值一致"等说明性文字，用于标注参数依据与实测出处。
+
+本声明不构成对任何第三方权利的主张，也不构成对其权利的否认。
+
+若任何权利人认为本项目中存在源自其作品的片段，请通过 https://github.com/kagennotsuki/AMD-CoGPU/issues
+联系。核实后我方将立即采取以下措施，以权利人要求为准：
+
+    (a) 补上该片段的原始版权行与署名；
+    (b) 随附其许可原文（例如 AMDNR_NOTICE.txt）；
+    (c) 或直接移除该片段。
+
+本项目自身以 GPL-3.0 授权，与上述 GPL-3.0 项目在许可上相容，
+不存在许可冲突（GPL-3.0 之间可以合并分发）。
+
+
+8. 文档
+-------
+
+  本项目的文档、图表、实测数据与方法论（含 01_文档 下的全部内容）以
+  CC BY-NC-SA 4.0 授权，见 LICENSE-DOCS。摘要：
+
+    * 必须署名（BY）
+    * 不得用于商业目的（NC）
+    * 修改后的作品必须以相同许可分发（SA）
+
+  引用、翻译、截图讨论、教学与非营利用途欢迎，注明出处即可。
+  商业用途（含付费课程、付费专栏、付费整合包、商业产品内文档）
+  须事先取得书面许可，联系 https://github.com/kagennotsuki/AMD-CoGPU/issues。
+
+
+9. 免责
+-------
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND.
+本项目会 hook 第三方游戏；使用风险与合规责任由使用者自负，
+包括各游戏的反作弊规则与最终用户许可协议。

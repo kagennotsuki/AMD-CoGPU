@@ -1,0 +1,140 @@
+# ============================================================================
+#  AMD CoGPU — .gitignore
+#  规则：源码进仓库，二进制 / 第三方 / 模型 / 本机状态 一律不进。
+#  目的见 NOTICE 第 6 节。
+# ============================================================================
+
+# --- 编译产物 -------------------------------------------------------------
+*.exe
+*.dll
+*.sys
+*.lib
+*.exp
+*.obj
+*.o
+*.a
+*.so
+*.pdb          # ★ 绝对不要上传：符号表会把逆向成本从数百小时降到数十小时
+*.ilk
+*.map
+*.idb
+*.iobj
+*.ipdb
+*.res
+*.tlog
+*.lastbuildstate
+*.recipe
+*.log
+*.sln.docstates
+.vs/
+Debug/
+Release/
+x64/
+x86/
+build/
+out/
+bin/
+obj/
+CMakeFiles/
+CMakeCache.txt
+
+# --- 模型 / 权重 / 运行时资产（不是我们的）--------------------------------
+*.pak
+*.bin
+*.hsaco
+*.cubin
+*.ptx
+*.onnx
+*.safetensors
+dlssnr-amd/
+LmxxfNrRuntime.dll
+LmxxfNrRuntime.pak
+MochizukiNrRuntime.dll
+DlssNrRuntime.dll
+
+# --- 厂商二进制（权利归 AMD / Intel / NVIDIA）-----------------------------
+libxess*.dll
+libxell*.dll
+libxelp*.dll
+nvngx_*.dll
+_nvngx.dll
+nvapi64.dll
+amd_fidelityfx_*.dll
+amd_ags*.dll
+dxgi.dll
+d3d12.dll
+D3D12Core.dll
+OptiScaler.dll
+
+# --- 游戏文件 / 反编译产物 -------------------------------------------------
+*.rpak
+*.pak.*
+*.paz
+*.pck
+*.exe.bak
+*.dll.bak
+*.bak
+*.bak-*
+*.bak.*
+*.off-*
+.IDA/
+*.id0
+*.id1
+*.id2
+*.nam
+*.til
+# 注意：不能用 *.asm 通配符排除 —— ingame 下的 MASM 转发源文件是构建必需输入；
+# 反汇编产物改由路径规则（反汇编/ disasm/）挡住。
+*.lst
+*.i64
+disasm/
+反汇编/
+
+# --- 抓帧 / 素材 -----------------------------------------------------------
+07_素材与抓帧/
+*.dds
+*.dmp
+*.raw
+抓帧/
+frames/
+
+# --- 本机状态（每次运行都变，没有版本意义）--------------------------------
+bform.txt
+saved.ini
+xess_proxy.*.txt
+*.log
+*.ini.bak
+u*.txt
+logs/
+crashes/
+
+# --- 备份 / 归档 -----------------------------------------------------------
+*_备份/
+*备份*/
+backup/
+备份/
+_归档/
+*.zip
+*.7z
+*.rar
+
+# --- 系统 / 编辑器 ---------------------------------------------------------
+Thumbs.db
+desktop.ini
+.DS_Store
+$RECYCLE.BIN/
+*.swp
+*~
+.vscode/
+.idea/
+*.user
+*.suo
+
+# --- 密钥 / 凭据（防误传）------------------------------------------------
+*.pfx
+*.p12
+*.pem
+*.key
+secrets.*
+.env
+.env.*
