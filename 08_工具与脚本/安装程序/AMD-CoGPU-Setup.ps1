@@ -37,7 +37,7 @@ Add-Type -AssemblyName System.Windows.Forms, System.Drawing
 
 $script:Root     = Split-Path -Parent $MyInvocation.MyCommand.Path
 $script:Payload  = Join-Path $script:Root 'payload'
-$script:Version  = 'B4K-20261029c-installfix1'
+$script:Version  = 'B4K-20261029c-installfix2'
 $script:HttpProxy = $Proxy
 $script:AppName  = 'AMD CoGPU'
 
@@ -1060,9 +1060,9 @@ function Show-Page {
         Add-Text '  3) 写入 bform / queuehook / 神经卡 / 抓帧开关 四个配置文件' 22 316 620 22
         Add-Text '  4) 生成「AMD-CoGPU-使用说明.txt」与「安装报告」' 22 338 620 22
         Add-Text '注意：安装前请先关闭游戏，否则 libxess.dll 会被占用导致复制失败。' 22 380 620 24 'OrangeRed'
-        Add-Text '⚠ B-4K 的限制：它的 NR 做在「A 卡超分之后的 4K 画面」上。如果游戏是在超分完成之后' 22 406 626 22 'OrangeRed'
-        Add-Text '   才把 UI（准星 / HUD / 字幕 / 菜单）覆盖上去，这些 UI 也会被一起送进 NR → 文字发虚、' 22 428 626 22 'OrangeRed'
-        Add-Text '   细线糊边、边缘抖动。这类游戏请选 A 形态（UI 由游戏在放大之后叠加，不受 NR 影响）。' 22 450 626 22 'OrangeRed'
+        Add-Text '⚠ B-4K 的限制：它的底图取自「A 卡超分之后的 4K 画面」，并且由 B 卡自己上屏。' 22 406 626 22 'OrangeRed'
+        Add-Text '   如果游戏在超分完成之后才把 UI（准星 / HUD / 字幕 / 菜单）画上去，这些 UI 不在底图里；' 22 428 626 22 'OrangeRed'
+        Add-Text '   而 B 出画又盖住游戏自己的画面 → 屏幕上完全看不到 UI。这类游戏请选 A 形态。' 22 450 626 22 'OrangeRed'
     }
 
     5 {   # ---- 运行时（别人的做法：用时从仓库下载）
