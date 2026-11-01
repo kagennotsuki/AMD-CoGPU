@@ -156,6 +156,17 @@ D3D12_CPU_PAGE_PROPERTY_NOT_AVAILABLE →  E_INVALIDARG（必须用 UNKNOWN）
 
 ---
 
+## 视频演示 · 联系作者
+
+- 📺 **[AMD CoGPU 实机演示（B 站）](https://www.bilibili.com/video/BV15qsQ6KEK9)** —— BV15qsQ6KEK9
+
+想看实机画面、进度更新，或者想聊技术细节，都可以到我的 B 站空间找我（视频下方留言 / 私信）。
+
+> Bug 与功能建议仍建议走 GitHub [Issues](https://github.com/kagennotsuki/AMD-CoGPU/issues)，
+> 方便留档和后续跟进；B 站适合快速问一句。
+
+---
+
 ## License
 
 | 部分 | 许可 |
@@ -175,6 +186,8 @@ D3D12_CPU_PAGE_PROPERTY_NOT_AVAILABLE →  E_INVALIDARG（必须用 UNKNOWN）
 若需要以不同条款商用（例如闭源集成），请到
 [Issues](https://github.com/kagennotsuki/AMD-CoGPU/issues) 开一个标题含
 `commercial licensing` 的 issue。
+
+想先聊聊再走流程，也可以直接通过上面的 [B 站](https://www.bilibili.com/video/BV15qsQ6KEK9) 联系我。
 
 ---
 
