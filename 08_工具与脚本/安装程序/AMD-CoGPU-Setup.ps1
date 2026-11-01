@@ -26,6 +26,7 @@
     [string]$RuntimeMode = 'auto', # auto | download | skip
     [string]$NrDev = '7550',
     [string]$Bform = '0',
+    [string]$Proxy,                      # 可选：显式指定代理，如 http://127.0.0.1:7890
     [switch]$UiSmokeTest           # 界面冒烟测试：逐页构建并戳控件，验证事件处理不炸
 )
 
@@ -37,6 +38,7 @@ Add-Type -AssemblyName System.Windows.Forms, System.Drawing
 $script:Root     = Split-Path -Parent $MyInvocation.MyCommand.Path
 $script:Payload  = Join-Path $script:Root 'payload'
 $script:Version  = 'B4K-20261029c'
+$script:HttpProxy = $Proxy
 $script:AppName  = 'AMD CoGPU'
 
 # ---------------------------------------------------------------- 通用工具
@@ -130,6 +132,8 @@ function Test-ComponentPresent {
     if ([string]::IsNullOrWhiteSpace($Dir) -or -not (Test-Path $Dir)) { return $false }
     $need = @($Comp.expect)
     if ($need.Count -eq 0) { $need = @('dlssnr-amd') }
+    # 代理真正需要的文件也必须在：只靠一个目录名判断会把"半成品"当成"已装"
+    if ($Comp.proxyRequires) { $need += @($Comp.proxyRequires) }
     foreach ($n in $need) { if (-not (Test-Path (Join-Path $Dir $n))) { return $false } }
     return $true
 }
@@ -141,11 +145,52 @@ function Test-RuntimePresent([string]$dir) {
     return $true
 }
 
+function Get-ProxyUrl {
+    # 优先级：-Proxy 参数 > 环境变量 > Windows 系统代理（IE 设置）
+    # 为什么需要这个：WebClient 默认【不读】系统代理，只认环境变量，
+    # 所以用户开了 Clash/加速器（系统代理）安装器仍然直连 → 下载失败。
+    if ($script:HttpProxy) { return $script:HttpProxy }
+    foreach ($k in 'HTTPS_PROXY','HTTP_PROXY','ALL_PROXY') {
+        $v = [Environment]::GetEnvironmentVariable($k)
+        if ($v) { return $v }
+    }
+    $ie = Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings' -ErrorAction SilentlyContinue
+    if ($ie -and $ie.ProxyEnable -eq 1 -and $ie.ProxyServer) {
+        $ps = [string]$ie.ProxyServer
+        if ($ps -match '=') {
+            $m = [regex]::Match($ps, 'https=([^;]+)')
+            if ($m.Success) { $ps = $m.Groups[1].Value }
+            else { $m = [regex]::Match($ps, 'http=([^;]+)'); if ($m.Success) { $ps = $m.Groups[1].Value } else { return $null } }
+        }
+        if ($ps -notmatch '^https?://') { $ps = 'http://' + $ps }
+        return $ps
+    }
+    return $null
+}
+
+function Get-FreeGB {
+    param([string]$Path)
+    try {
+        $p = (Resolve-Path $Path -ErrorAction Stop).Path
+        $root = [System.IO.Path]::GetPathRoot($p)
+        if (-not $root) { return $null }
+        return [math]::Round((New-Object System.IO.DriveInfo($root)).AvailableFreeSpace / 1GB, 2)
+    } catch { return $null }
+}
+
 function Invoke-Download {
     param([string]$Url, [string]$OutFile, [scriptblock]$OnProgress)
     if (Test-Path $OutFile) { Remove-Item $OutFile -Force -ErrorAction SilentlyContinue }
+    # TLS 1.2：老系统/老 .NET 默认可能是 TLS1.0，GitHub 会直接拒绝
+    try { [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12 } catch { }
     $wc = New-Object System.Net.WebClient
     $wc.Headers.Add('User-Agent', 'AMD-CoGPU-Setup')
+    $px = Get-ProxyUrl
+    if ($px) {
+        $wc.Proxy = New-Object System.Net.WebProxy($px)
+        $wc.Proxy.Credentials = [System.Net.CredentialCache]::DefaultCredentials
+        Write-Log ("使用代理：{0}" -f $px)
+    }
     $script:__lastPct = -1
     $handler = {
         param($sender, $e)
@@ -181,6 +226,13 @@ function Install-Component {
     } else {
         throw ("组件 {0} 没有可用的下载地址" -f $Comp.id)
     }
+    # 下载前先看 TEMP 有没有地方放这个 zip（764MB 级的文件）
+    $needMB = if ($src.size) { [math]::Round($src.size / 1MB) } else { 900 }
+    $freeTmp = Get-FreeGB $env:TEMP
+    if ($freeTmp -ne $null -and $freeTmp -lt ($needMB / 1024 * 1.15)) {
+        throw ("临时目录空间不足：需要约 {0} MB（{1} GB），当前只剩 {2} GB。`n  处理：清理 C 盘，或把 TEMP 环境变量指到空间更大的盘。" -f $needMB, [math]::Round($needMB/1024,2), $freeTmp)
+    }
+    if ($freeTmp -ne $null) { Write-Log ("临时目录可用 {0} GB，需要约 {1} GB" -f $freeTmp, [math]::Round($needMB/1024,2)) }
     $urls = @($src.url); if ($src.mirrors) { $urls += @($src.mirrors) }
     $zip = Join-Path $env:TEMP ('cogpu-' + $Comp.id + '-' + [guid]::NewGuid().ToString('N') + '.zip')
     $ok = $false
@@ -190,7 +242,16 @@ function Install-Component {
         try { Invoke-Download $u $zip $OnProgress; $ok = $true; break }
         catch { Write-Log ("该地址失败：{0}" -f $_.Exception.GetBaseException().Message) 'WARN' }
     }
-    if (-not $ok) { throw ("组件 {0}：所有地址都下载失败" -f $Comp.id) }
+    if (-not $ok) {
+        $hint = "组件 {0}：所有地址都下载失败（含镜像）。`n" -f $Comp.id
+        $hint += "  处理顺序：`n"
+        $hint += "    ① 先确认能打开 https://github.com（浏览器打不开就是网络问题，与本工具无关）`n"
+        $hint += "    ② 若开了代理/加速器：用 -Proxy 指定，例如`n"
+        $hint += "         powershell -ExecutionPolicy Bypass -File AMD-CoGPU-Setup.ps1 -Proxy http://127.0.0.1:7890`n"
+        $hint += "    ③ 或者先手动下载 runtime.zip，解压到游戏根目录，再重跑安装器并在第 6 步选「跳过」`n"
+        $hint += "  下载地址与 SHA256 见 runtime-manifest.json 的 selfHosted 字段。"
+        throw $hint
+    }
     Write-Log ("下载完成：{0:N1} MB" -f ((Get-Item $zip).Length / 1MB))
     if ($src.sha256) {
         $h = (Get-FileHash $zip -Algorithm SHA256).Hash
@@ -200,7 +261,40 @@ function Install-Component {
     } else { Write-Log '清单未提供 sha256，跳过校验' 'WARN' }
     Write-Log '解压到游戏目录…'
     Add-Type -AssemblyName System.IO.Compression.FileSystem
-    [System.IO.Compression.ZipFile]::ExtractToDirectory($zip, $GameDir)
+    # 逐条解压并【覆盖】已有文件。
+    # 不用 ExtractToDirectory：它在目标已存在同名文件时会抛 IOException，
+    # 而"上次装到一半"在用户机器上是常态，必须覆盖而不是失败。
+    # 解压前算一下解压后体积，再核对游戏所在盘的空间
+    $rawBytes = 0
+    $zr0 = [System.IO.Compression.ZipFile]::OpenRead($zip)
+    try { foreach ($x in $zr0.Entries) { $rawBytes += $x.Length } } finally { $zr0.Dispose() }
+    $needGameGB = [math]::Round($rawBytes / 1GB * 1.1 + 0.3, 2)
+    $freeGame = Get-FreeGB $GameDir
+    if ($freeGame -ne $null -and $freeGame -lt $needGameGB) {
+        throw ("游戏所在盘空间不足：解压需要约 {0} GB，当前只剩 {1} GB。`n  处理：清理该盘，或把游戏移到空间更大的盘再重装。" -f $needGameGB, $freeGame)
+    }
+    if ($freeGame -ne $null) { Write-Log ("游戏盘可用 {0} GB，解压需要约 {1} GB" -f $freeGame, $needGameGB) }
+    $zr = [System.IO.Compression.ZipFile]::OpenRead($zip)
+    $nFiles = 0
+    try {
+        foreach ($e in $zr.Entries) {
+            $rel = ($e.FullName -replace '/', '\').TrimStart('\')
+            if ([string]::IsNullOrWhiteSpace($rel)) { continue }
+            $dst = Join-Path $GameDir $rel
+            if ($rel.EndsWith('\') -or [string]::IsNullOrEmpty($e.Name)) {
+                if (-not (Test-Path $dst)) { New-Item -ItemType Directory -Path $dst -Force | Out-Null }
+                continue
+            }
+            $dd = Split-Path $dst -Parent
+            if (-not (Test-Path $dd)) { New-Item -ItemType Directory -Path $dd -Force | Out-Null }
+            try { [System.IO.Compression.ZipFileExtensions]::ExtractToFile($e, $dst, $true) }
+            catch {
+                throw ("解压失败：{0}`n  原因：{1}`n  处理：① 完全退出游戏（不是最小化）；② 关掉杀软实时扫描后再试；③ 重启电脑后重装。" -f $rel, $_.Exception.GetBaseException().Message)
+            }
+            $nFiles++
+        }
+    } finally { $zr.Dispose() }
+    Write-Log ("解压完成：{0} 个文件（同名文件已覆盖）" -f $nFiles) 'OK'
     Remove-Item $zip -Force -ErrorAction SilentlyContinue
 
     # 期望存在的文件
@@ -533,7 +627,9 @@ if ($SelfTest) {
             Write-Host ("    [{0}] {1}  ←  {2}（{3}）" -f $c.id, $c.title, $c.author, $c.license)
             if ($u -like '*<*' -or -not $u) { Write-Host '          ⚠ 下载地址还是占位符（发布前必须填写）' -ForegroundColor Yellow }
             else { Write-Host ("          url   : {0}" -f $u) }
-            if ($c.sha256) { Write-Host ("          sha256: {0}…" -f $c.sha256.Substring(0,16)) } else { Write-Host '          sha256: （未填，将跳过校验）' }
+            # 显示的 sha 必须与上面的 url 同源：自托管时用 selfHosted.sha256，否则会用上游的 sha 误导排查
+            $sh = if ($c.selfHosted -and $c.selfHosted.url -and $c.selfHosted.sha256) { $c.selfHosted.sha256 } else { $c.sha256 }
+            if ($sh) { Write-Host ("          sha256: {0}…" -f $sh.Substring(0,16)) } else { Write-Host '          sha256: （未填，将跳过校验）' }
             if ($c.proxyRequires -and @($c.proxyRequires).Count -gt 0) { Write-Host ("          代理需要: {0}" -f ((@($c.proxyRequires)) -join ', ')) }
             if ($c.selfHosted -and $c.selfHosted.url) { Write-Host ("          自托管: {0}" -f $c.selfHosted.url) }
         }
@@ -855,34 +951,27 @@ function Show-Page {
         Add-Text '为什么需要它：代理 DLL 必须放在游戏根目录，才能被游戏的加载器找到。' 22 200 626 24 'Gray'
     }
 
-    2 {   # ---- 超分功能确认
-        Add-Title '第 3 步 · 这个游戏有超分功能吗？' '跨卡管线依赖游戏的超分（XeSS / DLSS / FSR），否则无法安装'
-        Add-Text '请确认：游戏设置里能开启 XeSS（或 DLSS / FSR 的超分项）。' 22 108 626 24 'White'
-        $rYes = New-Object System.Windows.Forms.RadioButton
-        $rYes.Text = '有（我能在游戏里开启超分）'
-        $rYes.Location = New-Object System.Drawing.Point(26, 148)
-        $rYes.Size = New-Object System.Drawing.Size(320, 26)
-        $rNo = New-Object System.Windows.Forms.RadioButton
-        $rNo.Text = '没有 / 不确定'
-        $rNo.Location = New-Object System.Drawing.Point(26, 182)
-        $rNo.Size = New-Object System.Drawing.Size(320, 26)
-        $body.Controls.Add($rYes); $body.Controls.Add($rNo)
-        $hint = Add-Text '' 22 224 626 60 'Silver' -Return
-        $rYes.Add_CheckedChanged({
+    2 {   # ---- 超分功能确认（自动检测游戏目录里的 XeSS）
+        Add-Title '第 3 步 · 这个游戏自带 XeSS 吗？' '本工具只接管游戏自带的 XeSS（libxess.dll），DLSS / FSR 不支持'
+        $gd = $S.GameDir
+        $found = @()
+        if ($gd -and (Test-Path (Join-Path $gd 'libxess.dll')))      { $found += 'libxess.dll' }
+        if ($gd -and (Test-Path (Join-Path $gd 'libxess_orig.dll'))) { $found += 'libxess_orig.dll（原版 XeSS，之前装过）' }
+        $hint = Add-Text '' 22 112 626 130 'Silver' -Return
+        if ($found.Count -gt 0) {
             $S.HasUpscale = $true
-            $hint.Text = '很好，可以继续。安装完成后，游戏内的上采样请选 XeSS。'
+            $hint.Text = ("✔ 检测到游戏自带 XeSS：`r`n   {0}`r`n`r`n可以继续。安装完成后，游戏内的上采样请选 XeSS。" -f ($found -join "`r`n   "))
             $hint.ForeColor = [System.Drawing.Color]::LightGreen
             $btnNext.Enabled = $true
-        }.GetNewClosure())
-        $rNo.Add_CheckedChanged({
+        } else {
             $S.HasUpscale = $false
-            $hint.Text = "如果游戏没有超分功能，本工具无法安装：`r`n我们的管线是「游戏超分放大 → 第二张卡降噪」，缺少超分这一步就没有可用的底图。"
+            $hint.Text = ("✘ 游戏目录里没有 libxess.dll，说明这个作品没有自带 XeSS。`r`n`r`n" +
+                          "本工具的原理是替换游戏根目录的 libxess.dll，所以只支持自带 XeSS（2.x）的作品；`r`n只有 DLSS / FSR 的游戏用不了。`r`n`r`n" +
+                          "如果你确信它有 XeSS：先在游戏里把上采样切到 XeSS、进一次游戏再退出，然后重开安装器。")
             $hint.ForeColor = [System.Drawing.Color]::OrangeRed
             $btnNext.Enabled = $false
-        }.GetNewClosure())
-        if ($S.HasUpscale -eq $true) { $rYes.Checked = $true }
-        elseif ($S.HasUpscale -eq $false) { $rNo.Checked = $true }
-        else { $btnNext.Enabled = $false }
+        }
+        Add-Text '检测依据：游戏根目录是否存在 libxess.dll / libxess_orig.dll（后者是上次安装把原版改名留下的）。' 22 268 626 44 'Gray'
     }
 
     3 {   # ---- 选择显卡
@@ -908,27 +997,32 @@ function Show-Page {
         }
         $body.Controls.Add($cbGame); $body.Controls.Add($cbNr)
         $warn = Add-Text '' 22 236 626 84 'Goldenrod' -Return
-        $sel = {
-            $gi = $cbGame.SelectedIndex; $ni = $cbNr.SelectedIndex
-            $S.GameGpu = if ($gi -ge 0) { $gpus[$gi] } else { $null }
-            $S.NrGpu   = if ($ni -ge 0) { $gpus[$ni] } else { $null }
+        # 用"控件装进哈希表 + param($c) 传入"的写法：
+        # 直接把控件捕获进 GetNewClosure 在冒烟测试的沙箱里拿不到（第 6 步也踩过同一个坑，已按这个写法修好）
+        $p4 = @{ btn = $btnNext; warn = $warn; gpus = $gpus; cbG = $cbGame; cbN = $cbNr; S = $S }
+        $p4.upd = {
+            param($c)
+            $gi = $c.cbG.SelectedIndex; $ni = $c.cbN.SelectedIndex
+            $c.S.GameGpu = if ($gi -ge 0) { $c.gpus[$gi] } else { $null }
+            $c.S.NrGpu   = if ($ni -ge 0) { $c.gpus[$ni] } else { $null }
             $msgs = @()
-            if ($S.NrGpu) {
-                if (-not $S.NrGpu.IsAmd) { $msgs += '⚠ 神经卡不是 AMD 显卡：本工具只支持 AMD 双卡。' }
-                elseif (-not (Test-Rdna4 $S.NrGpu.DeviceId)) { $msgs += '⚠ 强烈建议神经卡使用 9000 系（RDNA4）显卡：老卡跑神经网络会更慢，可能达不到 60fps。' }
+            if ($c.S.NrGpu) {
+                if (-not $c.S.NrGpu.IsAmd) { $msgs += '⚠ 神经卡不是 AMD 显卡：本工具只支持 AMD 双卡。' }
+                elseif (-not (Test-Rdna4 $c.S.NrGpu.DeviceId)) { $msgs += '⚠ 强烈建议神经卡使用 9000 系（RDNA4）显卡：老卡跑神经网络会更慢，可能达不到 60fps。' }
             }
-            if ($S.GameGpu -and $S.NrGpu -and $gi -eq $ni) { $msgs += '⚠ 游戏卡与神经卡不能是同一张。' }
-            if (-not $S.GameGpu) { $msgs += '· 请选择游戏卡' }
-            if (-not $S.NrGpu)   { $msgs += '· 请选择神经卡' }
-            $warn.Text = ($msgs -join "`r`n")
-            $warn.ForeColor = if ($msgs -and ($msgs[0] -like '*⚠*')) { [System.Drawing.Color]::Goldenrod } else { [System.Drawing.Color]::Silver }
-            $btnNext.Enabled = ($S.GameGpu -and $S.NrGpu -and $gi -ne $ni)
+            if ($c.S.GameGpu -and $c.S.NrGpu -and $gi -eq $ni) { $msgs += '⚠ 游戏卡与神经卡不能是同一张。' }
+            if (-not $c.S.GameGpu) { $msgs += '· 请选择游戏卡' }
+            if (-not $c.S.NrGpu)   { $msgs += '· 请选择神经卡' }
+            $c.warn.Text = ($msgs -join "`r`n")
+            if ($msgs -and ($msgs[0] -like '*⚠*')) { $c.warn.ForeColor = [System.Drawing.Color]::Goldenrod }
+            else { $c.warn.ForeColor = [System.Drawing.Color]::Silver }
+            $c.btn.Enabled = [bool]($c.S.GameGpu -and $c.S.NrGpu -and $gi -ne $ni)
         }
-        $cbGame.Add_SelectedIndexChanged($sel.GetNewClosure())
-        $cbNr.Add_SelectedIndexChanged($sel.GetNewClosure())
+        $cbGame.Add_SelectedIndexChanged(({ & $p4.upd $p4 }).GetNewClosure())
+        $cbNr.Add_SelectedIndexChanged(({ & $p4.upd $p4 }).GetNewClosure())
         if ($gpus.Count -ge 2) { $cbGame.SelectedIndex = 0; $cbNr.SelectedIndex = 1 }
         elseif ($gpus.Count -eq 1) { $cbGame.SelectedIndex = 0; $cbNr.SelectedIndex = 0 }
-        & $sel
+        & $p4.upd $p4
         Add-Text '说明：游戏卡由游戏自己决定使用，这里记录用于报告；神经卡会写入配置，代理启动时按 DeviceId 精确选择。' 22 330 626 44 'Gray'
         Add-Text '每帧要过卡的数据（B-4K 形态）' 22 392 626 22 'White'
         Add-Text '  4K 彩色 33.2 MB ＋ 运动矢量 8.3 MB ≈ 41.5 MB/帧，60fps 下约 2.5 GB/s' 22 414 626 22 'Silver'
@@ -1062,7 +1156,13 @@ function Show-Page {
         try {
             $btnNext.Text = '安装中…'; $btnNext.Enabled = $false; $btnBack.Enabled = $false; $btnCancel.Enabled = $false
             Write-Log "开始安装到 $($plan.GameDir)"
-            if (Get-Process -Name 're2' -ErrorAction SilentlyContinue) { throw '检测到游戏正在运行，请先关闭游戏再安装' }
+            # 按"目标目录里的 exe 文件名"判断进程，别写死 re2（装 RE4/RE3 时原来这条根本不触发）
+            $exeNames = @(Get-ChildItem $plan.GameDir -File -Filter *.exe -ErrorAction SilentlyContinue |
+                          Where-Object { $_.BaseName -notmatch '^(unins\d*|setup|install|vc_?redist|dxsetup|dxwebsetup)$' } |
+                          ForEach-Object { $_.BaseName })
+            $running = @()
+            foreach ($en in $exeNames) { if (Get-Process -Name $en -ErrorAction SilentlyContinue) { $running += $en } }
+            if ($running.Count -gt 0) { throw ("检测到游戏正在运行（{0}），请先完全退出游戏再安装" -f ($running -join ', ')) }
             $items = Invoke-Install -Plan $plan
 
             # ---- 运行时：逐个组件（已有就跳过；没有就按清单来源下载）----

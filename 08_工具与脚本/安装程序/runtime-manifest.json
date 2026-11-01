@@ -1,4 +1,4 @@
-﻿{
+{
     "version":  "2.0",
     "_说明":  "AMD CoGPU 运行时清单（作者维护）。每个组件可各自指向自己的上游仓库；安装器逐个下载、校验、解压，并检查【我们代理真正需要的文件】是否齐备。终端用户不需要改这里。",
     "author":  "AMD CoGPU",
@@ -39,7 +39,9 @@
                            "selfHosted":  {
                                               "url":  "https://github.com/kagennotsuki/AMD-CoGPU/releases/download/runtime-v1.0/runtime.zip",
                                               "mirrors":  [
-                                                              "https://ghproxy.net/https://github.com/kagennotsuki/AMD-CoGPU/releases/download/runtime-v1.0/runtime.zip"
+                                                              "https://ghproxy.net/https://github.com/kagennotsuki/AMD-CoGPU/releases/download/runtime-v1.0/runtime.zip",
+                                                              "https://ghfast.top/https://github.com/kagennotsuki/AMD-CoGPU/releases/download/runtime-v1.0/runtime.zip",
+                                                              "https://gh-proxy.com/https://github.com/kagennotsuki/AMD-CoGPU/releases/download/runtime-v1.0/runtime.zip"
                                                           ],
                                               "size":  801163330,
                                               "sha256":  "5FA041257D46AC1AACCDF0CFB9E3B467B929B09B466779DD16B8EC83C7830D47"
