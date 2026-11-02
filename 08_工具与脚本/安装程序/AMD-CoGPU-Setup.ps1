@@ -37,7 +37,7 @@ Add-Type -AssemblyName System.Windows.Forms, System.Drawing
 
 $script:Root     = Split-Path -Parent $MyInvocation.MyCommand.Path
 $script:Payload  = Join-Path $script:Root 'payload'
-$script:Version  = 'B4K-20261029c-installfix2'
+$script:Version  = '0.1.1'
 $script:HttpProxy = $Proxy
 $script:AppName  = 'AMD CoGPU'
 

@@ -236,8 +236,8 @@ static volatile int g_modelSel = 1;      // 模型请求：1 = Original 71-block
 // ---- mochizuki 风格化控制块（S4）：布局来自交接包 §九.3（反汇编 parse 得到）----
 // 0x00 size(0x20C) / 0x08 intensity / 0x0C style / 0x10 tone / 0x14 structure /
 // 0x18 skin / 0x1C automask / 0x20 grade / 0x2C 总闸（必须非 0，否则整块无效）
-static volatile float g_nrIntensity = 1.0f, g_nrTone = 1.0f, g_nrStruct = 1.0f;
-static volatile float g_nrSkin = -1.0f, g_nrGrade = 2.0f;
+static volatile float g_nrIntensity = 2.0f, g_nrTone = 1.0f, g_nrStruct = 1.0f;   // 2.0 = 本项目调好的默认（见 0.1.1 定版说明）
+static volatile float g_nrSkin = -1.0f, g_nrGrade = 1.0f;   // grade 1.0 = mochizuki 缺省
 static volatile int   g_nrStyle = 0;                 // 0 Default / 1 Natural / 2 Cinematic
 static volatile bool  g_nrAutoMask = false, g_nrCtrlOn = true;
 static volatile bool  g_ctrlDirty = true;            // 让 worker 下一帧重新下发
@@ -483,7 +483,10 @@ static void ApplyMochiControls(bool force = false) {
     Worker& W = g_worker;
     if (!W.isMochi || !W.setControls || !W.ctx) return;
     if (!force && !g_ctrlDirty) return;
-    uint8_t blk[256] = { 0 };
+    // ★ 块尺寸必须与 struct_size 一致：运行时读 min(size,0x20C) 字节。
+    //   以前声明 0x20C、缓冲只有 256 ⇒ 运行时会读过界 268 字节（读到栈垃圾）。
+    //   parse 实际只读 ≤0xEC，所以行为不变，但过界读本身是 UB，这里按声明尺寸给足。
+    uint8_t blk[0x20C] = { 0 };
     auto putF = [&](int off, float v) { memcpy(blk + off, &v, 4); };
     auto putU = [&](int off, uint32_t v) { memcpy(blk + off, &v, 4); };
     putU(0x00, 0x20Cu);                              // struct_size（运行时 min(size,0x20C)，且要求 >=4）
@@ -1020,6 +1023,42 @@ static void WorkerMain() {
                             D3D12_RANGE rr{ 0, (SIZE_T)tot2 };
                             void* rm = nullptr;
                             if (SUCCEEDED(W.rbPriv->Map(0, &rr, &rm)) && rm) {
+                                // ===== 一次性诊断（只在游戏目录存在 xess_proxy.podiag.txt 时生效）=====
+                                //   目的：把运行时答案（private_output）的真实字节打出来，
+                                //   与我们在 FFX 代理里的同口径观测对照，判断"答案到底是不是浮点残差"。
+                                {
+                                    static bool diagDone = false;
+                                    static int diagGate = -1;
+                                    if (diagGate < 0) {
+                                        std::string gate = ModuleDir() + "xess_proxy.podiag.txt";
+                                        diagGate = (GetFileAttributesA(gate.c_str()) != INVALID_FILE_ATTRIBUTES) ? 1 : 0;
+                                    }
+                                    static int diagShot = 0;
+                                    const bool shoot = (diagGate == 1) &&
+                                                       ((diagShot == 0 && W.processed >= 60) ||
+                                                        (diagShot == 1 && W.processed >= 300) ||
+                                                        (diagShot == 2 && W.processed >= 600));
+                                    if (shoot) {
+                                        diagShot++;
+                                        const unsigned char* b0 = (const unsigned char*)rm;
+                                        D3D12_RESOURCE_DESC pd2 = ((ID3D12Resource*)job.private_output)->GetDesc();
+                                        Log("DIAG-POB: po fmt=%d %ux%u RowPitch=%u | 前16字节= %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X",
+                                            (int)pd2.Format, (unsigned)pd2.Width, (unsigned)pd2.Height, (unsigned)W.fpPriv.Footprint.RowPitch,
+                                            b0[0],b0[1],b0[2],b0[3],b0[4],b0[5],b0[6],b0[7],
+                                            b0[8],b0[9],b0[10],b0[11],b0[12],b0[13],b0[14],b0[15]);
+                                        float f0 = 0; memcpy(&f0, b0, 4);
+                                        Log("DIAG-POB2: 帧%d 按 R32_FLOAT 首像素 = %.6g ；outBuf[0..3]=%u,%u,%u,%u",
+                                            (int)W.processed, f0, W.outBuf[0], W.outBuf[1], W.outBuf[2], W.outBuf[3]);
+                                        {   // 前 4096 字节里有多少非零；前 1024 个 float 的 min/max/mean
+                                            int nz = 0; for (int k = 0; k < 4096; ++k) if (b0[k]) ++nz;
+                                            float mn = 1e30f, mx = -1e30f; double sum = 0; int n = 0;
+                                            for (int k = 0; k < 1024; ++k) { float v; memcpy(&v, b0 + k * 4, 4);
+                                                if (v < mn) mn = v; if (v > mx) mx = v; sum += v; ++n; }
+                                            Log("DIAG-POB3: 帧%d 前4096字节非零=%d/4096 | float min=%.6g max=%.6g mean=%.6g",
+                                                (int)W.processed, nz, mn, mx, n ? sum / n : 0.0);
+                                        }
+                                    }
+                                }
                                 UINT pitch = W.fpPriv.Footprint.RowPitch;
                                 for (UINT y = 0; y < kNetH; ++y)
                                     memcpy(&W.outBuf[(size_t)y * kNetW * 4],
@@ -1186,7 +1225,10 @@ static Params FactoryParams() {
     p.transfer = 1.0f; p.colorStr = 1.0f; p.jitter = 0.5f;
     p.dejitterSign = 1.0f; p.uiScale = 1.0f; p.varGain = 0.0f;
     p.debugView = 0; p.dejitter = false; p.bypass = false; p.useGpuRes = true;
-    p.nrIntensity = 1.0f; p.nrTone = 1.0f; p.nrStruct = 1.0f; p.nrSkin = -1.0f; p.nrGrade = 2.0f;
+    // ★ mochizuki 运行时的真默认（交接包 §九.3：0x20 限幅 1..8、缺省 1）
+    //   以前这里写的是 2.0（我们实测好看的值），所以「恢复默认设置」恢复出来的
+    //   不是真默认 ⇒ 数值/画面都停在"重风格"那一档。
+    p.nrIntensity = 2.0f; p.nrTone = 1.0f; p.nrStruct = 1.0f; p.nrSkin = -1.0f; p.nrGrade = 1.0f;
     p.nrStyle = 0; p.nrAutoMask = false; p.nrCtrlOn = true;
     p.mirrorOn = false;
     return p;
@@ -5059,7 +5101,7 @@ static void ProxyImGuiDraw(ID3D12GraphicsCommandList* cl, ID3D12Resource* rt) {
             if (ImGui::Checkbox("自动人物/皮肤掩码", &am)) { g_nrAutoMask = am; g_ctrlDirty = true; }
             float gr = (float)g_nrGrade;
             if (ImGui::SliderFloat("风格分级 grade（0x20）", &gr, 0.0f, 8.0f, "%.1f")) { g_nrGrade = gr; g_ctrlDirty = true; }
-            ImGui::SetItemTooltip("交接包实测：默认 1 时效果很弱，2.0 才明显；上限 8");
+            ImGui::SetItemTooltip("mochizuki 缺省 = 1.0（≈1/255，效果很弱）；2.0 才明显（≈9/255，交接包实测）；上限 8");
             ImGui::TextDisabled("（已下发: %s）", g_ctrlDirty ? "等待 worker 下发" : "已生效");
         }
 
@@ -5154,9 +5196,15 @@ static void ProxyImGuiDraw(ID3D12GraphicsCommandList* cl, ID3D12Resource* rt) {
         ImGui::SameLine();
         if (ImGui::Button("恢复默认设置")) {
             ApplyParams(FactoryParams());
-            Log("菜单: 已恢复默认设置（出厂值；你的存档文件保留）");
+            // 把"恢复成了什么"写进日志：以后再出现"点了没反应"，一眼能分辨
+            // 是按钮没吃到点击、还是数值回了但画面没回。
+            Log("菜单: 已恢复默认设置 → 网络强度=%.2f 风格=%d 影调=%.2f 结构=%.2f 皮肤=%.2f 掩码=%d grade=%.1f 总开关=%d"
+                "（mochizuki 运行时真默认；你的存档文件保留）",
+                (float)g_nrIntensity, (int)g_nrStyle, (float)g_nrTone, (float)g_nrStruct,
+                (float)g_nrSkin, (int)g_nrAutoMask, (float)g_nrGrade, (int)g_nrCtrlOn);
         }
-        ImGui::SetItemTooltip("回到代码里的出厂默认值（= .bak 基线那一套）；不会删除 xess_proxy.saved.ini");
+        ImGui::SetItemTooltip("回到 mochizuki 运行时的真默认：网络强度1.00 / 风格0 / 影调1.00 / 结构1.00 / 皮肤-1.00 / 掩码关 / grade 1.0 / 总开关开"
+                             "（以前给的是 grade 2.00，视觉上明显更重）；不会删除 xess_proxy.saved.ini");
         ImGui::SameLine(); ImGui::TextDisabled("拖标题栏移动 · 拖右下角缩放");
         float us = (float)g_uiScale;
         if (ImGui::SliderFloat("界面缩放", &us, 0.6f, 2.5f, "%.2f")) g_uiScale = us;
