@@ -107,6 +107,10 @@ D3D12_CPU_PAGE_PROPERTY_NOT_AVAILABLE →  E_INVALIDARG（必须用 UNKNOWN）
 
 游戏内热键：`Del` 菜单 · `F10` NR 开关 · 小键盘 `1` 或 `End`（NumLock 关）切换 A ↔ B-4K 形态
 
+> **NR 默认关闭**：进游戏先按 `F10` 开启（网络在加载阶段已预建好，按下即出画面，不用等）。
+>
+> **`Del` 参数菜单只在 NR 开启时才会显示** —— 按 `Del` 没反应，就先按 `F10`。
+
 ---
 
 ## 目录

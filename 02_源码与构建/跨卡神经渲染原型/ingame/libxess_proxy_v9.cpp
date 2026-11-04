@@ -46,7 +46,8 @@ static const char* kNames[72] = {
 
 static HMODULE g_self = nullptr, g_real = nullptr;
 static FILE* g_log = nullptr;
-static volatile bool g_nrOn = true;
+static volatile bool g_nrOn = false;   // ★ 默认【关】：进游戏先给原生画面，按 F10 才开 NR
+                                       //   （网络在加载阶段已预建，所以第一次按 F10 立即出画面，不必等约 0.9 秒）
 static bool g_disabled = false;
 static ComPtr<ID3D12Resource> g_fedTex[8];   // ≥ K（K 上限 8）
 // （SRV 槽位映射见 K 声明之后的 kSrv* 常量）
@@ -237,7 +238,7 @@ static volatile int g_modelSel = 1;      // 模型请求：1 = Original 71-block
 // 0x00 size(0x20C) / 0x08 intensity / 0x0C style / 0x10 tone / 0x14 structure /
 // 0x18 skin / 0x1C automask / 0x20 grade / 0x2C 总闸（必须非 0，否则整块无效）
 static volatile float g_nrIntensity = 2.0f, g_nrTone = 1.0f, g_nrStruct = 1.0f;   // 2.0 = 本项目调好的默认（见 0.1.1 定版说明）
-static volatile float g_nrSkin = -1.0f, g_nrGrade = 1.0f;   // grade 1.0 = mochizuki 缺省
+static volatile float g_nrSkin = -1.0f, g_nrGrade = 2.0f;   // grade 2.0 = 本项目实测观感（0.1.2 起作为出厂默认）
 static volatile int   g_nrStyle = 0;                 // 0 Default / 1 Natural / 2 Cinematic
 static volatile bool  g_nrAutoMask = false, g_nrCtrlOn = true;
 static volatile bool  g_ctrlDirty = true;            // 让 worker 下一帧重新下发
@@ -303,19 +304,32 @@ static bool WorkerInit() {
         //     nr=luid:00000000:0001A2B3   按 LUID（同名双卡时更精确）
         //   文件不存在 / 解析失败 / 不匹配 → 完全回落到原有自动选择（0x7550 → 序数 1）
         LUID wantLuid{}; bool haveWant = false; bool haveWantDev = false;
+        unsigned wantSub = 0; bool haveWantSub = false;   // nr=sub:deviD:subsys —— 同 DeviceId 双卡靠子型号区分
         {
             std::string gp = ModuleDir() + "xess_proxy.gpu.txt";
             FILE* gf = nullptr;
             if (fopen_s(&gf, gp.c_str(), "r") == 0 && gf) {
+                // ★ 必须整文件读进来再用 sscanf 试格式：
+                //   fscanf 在"字面量中途失配"时已经消费掉了已匹配的字符（例如先把 "nr=" 吃掉），
+                //   导致顺序尝试第二种格式时永远从错误位置开始 ⇒ 以前 nr=luid: 与 nr=sub: 都读不到。
+                char gbuf[256] = { 0 };
+                size_t gotBytes = fread(gbuf, 1, sizeof(gbuf) - 1, gf);
+                gbuf[gotBytes] = 0;
+                fclose(gf);
                 unsigned long long hi = 0, lo = 0;
-                unsigned int wantDev = 0;
-                int gotDev = fscanf_s(gf, "nr=dev:%x", &wantDev);
-                if (gotDev == 1 && wantDev) { g_wantDevId = wantDev; haveWantDev = true; }
-                else if (fscanf_s(gf, "nr=luid:%llx:%llx", &hi, &lo) == 2) {
+                unsigned int wantDev = 0, wantSubTmp = 0;
+                if (sscanf_s(gbuf, "nr=sub:%x:%x", &wantDev, &wantSubTmp) == 2 && wantDev) {
+                    // DeviceId + 子型号（SubsystemId）双键：同 DeviceId 的两张卡（如 9070 XT / 9070 GRE 都是 0x7550）也能区分
+                    g_wantDevId = wantDev; wantSub = wantSubTmp; haveWantDev = true; haveWantSub = true;
+                }
+                else if (sscanf_s(gbuf, "nr=dev:%x", &wantDev) == 1 && wantDev) {
+                    g_wantDevId = wantDev; haveWantDev = true;
+                }
+                else if (sscanf_s(gbuf, "nr=luid:%llx:%llx", &hi, &lo) == 2) {
                     wantLuid.HighPart = (LONG)hi; wantLuid.LowPart = (DWORD)lo; haveWant = true;
                 }
-                fclose(gf);
                 if (haveWantDev) Log("worker: 读到安装器的神经卡选择 DeviceId=0x%04X", g_wantDevId);
+                if (haveWantSub) Log("worker: 读到安装器的神经卡选择 SubsystemId=0x%04X（按子型号精确选卡）", wantSub);
                 else if (haveWant) Log("worker: 读到安装器的神经卡选择 LUID=%08X:%08X", (unsigned)wantLuid.HighPart, (unsigned)wantLuid.LowPart);
             }
         }
@@ -325,12 +339,20 @@ static bool WorkerInit() {
             if (fac->EnumAdapters1(i, a1.GetAddressOf()) != S_OK) break;
             DXGI_ADAPTER_DESC dd{};
             a1->GetDesc(&dd);
-            Log("  worker 候选[%u] = %ls  DeviceId=0x%04X", i, dd.Description, dd.DeviceId);
-            if (haveWantDev) { if (dd.DeviceId == g_wantDevId && !best) best = a1; }
+            Log("  worker 候选[%u] = %ls  DeviceId=0x%04X  SubSysId=0x%08X", i, dd.Description, dd.DeviceId, (unsigned)dd.SubSysId);
+            if (haveWantSub) {
+                // 子型号也必须一致，避免"同 DeviceId 的另一张卡"被选中
+                if (dd.DeviceId == g_wantDevId && (unsigned)((dd.SubSysId >> 16) & 0xFFFF) == wantSub && !best) best = a1;
+            }
+            else if (haveWantDev) { if (dd.DeviceId == g_wantDevId && !best) best = a1; }
             else if (haveWant && (dd.AdapterLuid.HighPart == wantLuid.HighPart) && (dd.AdapterLuid.LowPart == wantLuid.LowPart)) best = a1;
             else if (!haveWant && dd.DeviceId == 0x7550 && !best) best = a1;   // 未指定时按 DeviceId（0x7550 = RX 9070 XT）
         // 不再按名字兜底：显卡可被改名，只有 DeviceId 可靠（0x7550 = Navi48 / RX 9070 XT）
             if (i == 1 && !fallback) fallback = a1;
+        }
+        if (!best && haveWantDev) {
+            Log("worker: 注意：配置指定的神经卡（DeviceId=0x%04X%s）在枚举里没找到，回落到序数 1 的适配器",
+                g_wantDevId, haveWantSub ? " + 子型号" : "");
         }
         ad = best ? best : fallback;
     }
@@ -1225,10 +1247,10 @@ static Params FactoryParams() {
     p.transfer = 1.0f; p.colorStr = 1.0f; p.jitter = 0.5f;
     p.dejitterSign = 1.0f; p.uiScale = 1.0f; p.varGain = 0.0f;
     p.debugView = 0; p.dejitter = false; p.bypass = false; p.useGpuRes = true;
-    // ★ mochizuki 运行时的真默认（交接包 §九.3：0x20 限幅 1..8、缺省 1）
-    //   以前这里写的是 2.0（我们实测好看的值），所以「恢复默认设置」恢复出来的
-    //   不是真默认 ⇒ 数值/画面都停在"重风格"那一档。
-    p.nrIntensity = 2.0f; p.nrTone = 1.0f; p.nrStruct = 1.0f; p.nrSkin = -1.0f; p.nrGrade = 1.0f;
+    // ★ 出厂默认 = 本项目实测调好的值（不是上游的裸默认）：
+    //   intensity 2.0 / grade 2.0 —— 用户按「恢复默认设置」应当回到这套可用的观感。
+    //   （mochizuki 上游缺省是 grade 1.0，效果很弱；1.x 版本曾按上游给 1.0，导致"恢复默认"看起来变淡。）
+    p.nrIntensity = 2.0f; p.nrTone = 1.0f; p.nrStruct = 1.0f; p.nrSkin = -1.0f; p.nrGrade = 2.0f;
     p.nrStyle = 0; p.nrAutoMask = false; p.nrCtrlOn = true;
     p.mirrorOn = false;
     return p;
@@ -4268,10 +4290,11 @@ extern "C" int ProxyExecute(void* ctx, void* cmdList, const void* params) {
     using Fn = int(*)(void*, void*, const void*);
     Fn real = (Fn)g_xessTab[30];
     if (!params || !cmdList) return real ? real(ctx, cmdList, params) : -1;
-    if (g_disabled || !g_nrOn) {
-        BformPresentShow(false);   // NR 关掉 → 先卸覆盖层，否则会留一张冻结的 B 画面（F10 "像没生效"）
+    if (g_disabled) {
+        BformPresentShow(false);
         return real ? real(ctx, cmdList, params) : -1;
     }
+    // 注：NR 关闭时【不再】在这里早退 —— 见下面"预建网络"的说明。
 
     // ★ 启动时自动载入用户存档（xess_proxy.saved.ini）
     //   以前只有菜单里的「恢复上次保存」会读它 → 每次启动都退回代码默认值，
@@ -4289,6 +4312,29 @@ extern "C" int ProxyExecute(void* ctx, void* cmdList, const void* params) {
             } else {
                 Log("启动: 没有用户存档（xess_proxy.saved.ini），使用代码默认值");
             }
+        }
+    }
+
+    // ★ NR 初始状态：默认【关闭】
+    //   理由：进游戏先进原生画面，想用再按 F10 开；避免一进游戏就被 NR 接管出画。
+    //   想要"默认就开"：在游戏目录放 xess_proxy.nr.txt，内容写 1。
+    {
+        static bool nrInitDone = false;
+        if (!nrInitDone) {
+            nrInitDone = true;
+            // ★ 不再无条件写 false：那样会冲掉玩家在代理加载前就按下的 F10。
+            //   只在存在 xess_proxy.nr.txt 时按它的值覆盖（0=默认关 / 1=默认开）。
+            std::string np = ModuleDir() + "xess_proxy.nr.txt";
+            FILE* nf = nullptr;
+            if (fopen_s(&nf, np.c_str(), "r") == 0 && nf) {
+                char nb[32] = { 0 };
+                size_t gn = fread(nb, 1, sizeof(nb) - 1, nf);
+                nb[gn] = 0;
+                fclose(nf);
+                if (nb[0] == '0') { g_nrOn = false; }
+                else if (nb[0] == '1') { g_nrOn = true; }
+            }
+            Log("启动: NR 初始状态 = %s（F10 切换；xess_proxy.nr.txt 写 0/1 可固定默认）", g_nrOn ? "开" : "关");
         }
     }
 
@@ -4353,6 +4399,17 @@ extern "C" int ProxyExecute(void* ctx, void* cmdList, const void* params) {
         g_worker.th = std::thread(WorkerMain);
         inited = true;
         Log("初始化完成（方案 B：槽位%d / 喂帧滞后%d / 呈现延迟%d / 余量%d 帧）", K, kFeedLag, (int)g_kDelay, (int)g_kDelay - kFeedLag);
+    }
+
+    // ★ 预建网络（解决"第一次按 F10 要等约 0.9 秒"）：
+    //   初始化上面已经跑完（含 WorkerCreateSession → 运行时开始建网络），即使 NR 关着也先建好。
+    //   实测证据：默认关时，首次开 NR 的日志出现 "建网络等待结束（等了 9×100ms）" + "#1 911.2 ms"，
+    //   期间没有任何答案 ⇒ 不合成 ⇒ 画面不变，用户以为没生效就会再按一次（反而关掉）。
+    //   现在网络在加载阶段就建，进游戏后按 F10 即刻出画面。
+    if (!g_nrOn) {
+        // 默认就是这条路：网络已预建，但用户还没按 F10 ⇒ 本帧走原生，不合成、不留覆盖层
+        BformPresentShow(false);
+        return real ? real(ctx, cmdList, params) : -1;
     }
 
     auto tA = Clock::now();
@@ -5901,7 +5958,7 @@ static DWORD WINAPI HotkeyThread(LPVOID) {
         }
         pDel = dDel;
         bool d10 = (GetAsyncKeyState(VK_F10) & 0x8000) != 0;
-        if (d10 && !p10) { g_nrOn = !g_nrOn; Log("*** F10: NR %s ***", g_nrOn ? "开" : "关"); }
+        if (d10 && !p10) { g_nrOn = !g_nrOn; Log("*** F10: NR %s（帧 %d）***", g_nrOn ? "开" : "关", (int)g_frame); }
         p10 = d10;
         static bool p11 = false;
         bool d11 = false;   // 已停用（改在菜单里调）：VK_F11

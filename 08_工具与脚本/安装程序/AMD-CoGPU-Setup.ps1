@@ -37,7 +37,7 @@ Add-Type -AssemblyName System.Windows.Forms, System.Drawing
 
 $script:Root     = Split-Path -Parent $MyInvocation.MyCommand.Path
 $script:Payload  = Join-Path $script:Root 'payload'
-$script:Version  = '0.1.1'
+$script:Version  = '0.1.2'
 $script:HttpProxy = $Proxy
 $script:AppName  = 'AMD CoGPU'
 
@@ -78,9 +78,19 @@ function Get-Gpus {
         if ($v.PNPDeviceID -match 'DEV_([0-9A-Fa-f]{4})') { $dev = $Matches[1].ToUpper() }
         $isAmd = ($v.PNPDeviceID -match 'VEN_1002')
         $ramGB = if ($vram.ContainsKey($dev)) { $vram[$dev] } elseif ($v.DeviceId -eq '') { 0 } else { 4 }   # 取不到时按 4GB 占位
+        # PnpId / Inst 是"设备实例身份"：跨重启稳定，同型号两张卡也不同。
+        # 不用 DeviceId 判同一张卡：DeviceId 是型号 ID，同型号双卡会撞（实测有用户两卡都报 0x7550）。
+        # 不用 LUID：DXGI 的 AdapterLuid 每次开机可能变，写进持久配置不可靠。
+        $inst = ''
+        if ($v.PNPDeviceID) { $parts = $v.PNPDeviceID -split '\\'; $inst = $parts[$parts.Count - 1] }
+        $sub = ''
+        if ($v.PNPDeviceID -match 'SUBSYS_([0-9A-Fa-f]{4})') { $sub = $Matches[1].ToUpper() }
         $out += [pscustomobject]@{
             Name     = $v.Name
             DeviceId = $dev
+            Subsys   = $sub
+            PnpId    = [string]$v.PNPDeviceID
+            Inst     = $inst
             Vendor   = if ($isAmd) { 'AMD' } else { '其他' }
             IsAmd    = $isAmd
             VramGB   = $ramGB
@@ -499,7 +509,11 @@ function Invoke-Install {
     $cfgs = @(
         @{ Name = 'xess_proxy.bform.txt';     Value = $Plan.Bform;     Note = if ($Plan.Bform -eq '9') { '4K 后置形态' } else { 'A 形态' } },
         @{ Name = 'xess_proxy.queuehook.txt'; Value = $Plan.QueueHook; Note = '队列钩子' },
-        @{ Name = 'xess_proxy.gpu.txt';       Value = "nr=dev:$($Plan.NrDeviceId)"; Note = '神经卡选择' },
+        # 两张卡 DeviceId 相同时（同芯片、不同板型，例如 9070 XT 与 9070 GRE 都报 0x7550），
+        # nr=dev: 只能命中第一张匹配的卡 ⇒ 改写 nr=sub:deviD:subsys，代理会同时比对 SubsystemId。
+        @{ Name = 'xess_proxy.gpu.txt';
+           Value = $(if ($Plan.NrSubsys -and ($Plan.GameDeviceId -eq $Plan.NrDeviceId)) { "nr=sub:$($Plan.NrDeviceId):$($Plan.NrSubsys)" } else { "nr=dev:$($Plan.NrDeviceId)" });
+           Note  = $(if ($Plan.NrSubsys -and ($Plan.GameDeviceId -eq $Plan.NrDeviceId)) { '神经卡选择（按子型号精确）' } else { '神经卡选择' }) },
         @{ Name = 'xess_proxy.dumpshot.txt';  Value = '0 0';           Note = '关闭抓帧' }
     )
     foreach ($c in $cfgs) {
@@ -556,7 +570,9 @@ function New-UsageDoc {
 
 【热键】
   Del                打开 / 关闭 参数菜单
-  F10                神经降噪（NR）开 / 关
+                     ★ 菜单只在 NR 开启时才会绘制：
+                       进游戏先按 F10 开 NR，再按 Del 才会看到菜单。
+  F10                神经降噪（NR）开 / 关（默认关；按下即出画面）
   小键盘 1 / End     形态热切换（NumLock 需处于关闭状态）
                      · 没有小键盘的键盘：直接按 End，与"小键盘 1"是同一个键
                      · A 形态      ：NR 在 1440p 上做，再交给游戏放大出画
@@ -566,9 +582,10 @@ function New-UsageDoc {
   旧版的 F2~F8 / F11 单键已停用。
 
 【启动前检查】
-  1. 游戏目录里的 libxess.dll 必须是本工具装的（809,984 字节 ≈ 791 KB，定版 B4K-20261029c）
+  1. 游戏目录里的 libxess.dll 必须是本安装器装的（0.1.2 版为 814,080 字节）
   2. 神经卡（默认 RX 9070 XT）要能被系统识别，且不要被其它程序独占
-  3. 进游戏后直接按 F10 就会出 NR 画面（定版 c 起不再需要"先开一次菜单"）；
+  3. NR 默认关：进游戏后按一次 F10 开启（网络已在加载阶段预建，按下即出画面，不必等待）；
+     想看参数菜单要先开 NR（Del 菜单只在 NR 开启时绘制）。
      日志里出现 "WND: 已定位游戏主窗口 …（不依赖菜单）" 就说明窗口已自动拿到
 
 【怎么判断在工作】
@@ -991,7 +1008,10 @@ function Show-Page {
         $cbNr.Location = New-Object System.Drawing.Point(22, 196); $cbNr.Size = New-Object System.Drawing.Size(626, 26)
         $cbNr.DropDownStyle = 'DropDownList'
         foreach ($g in $gpus) {
-            $label = "{0}   [DeviceId 0x{1}]  {2} GB  {3}" -f $g.Name, $g.DeviceId, $g.VramGB, $(if (Test-Rdna4 $g.DeviceId) { '★9000系' } elseif ($g.IsAmd) { 'AMD' } else { $g.Vendor })
+            # 同型号 / 同 DeviceId 的两张卡，靠设备实例尾号区分（跨重启稳定）
+            $tail = ''
+            if ($g.Inst) { $tail = '  ·实例…' + $g.Inst.Substring([Math]::Max(0, $g.Inst.Length - 4)) }
+            $label = "{0}   [DeviceId 0x{1}]  {2} GB  {3}{4}" -f $g.Name, $g.DeviceId, $g.VramGB, $(if (Test-Rdna4 $g.DeviceId) { '★9000系' } elseif ($g.IsAmd) { 'AMD' } else { $g.Vendor }), $tail
             $cbGame.Items.Add($label) | Out-Null
             $cbNr.Items.Add($label)   | Out-Null
         }
@@ -1149,6 +1169,8 @@ function Show-Page {
             Bform        = $S.Bform
             QueueHook    = $S.QueueHook
             NrDeviceId   = $S.NrGpu.DeviceId
+            NrSubsys     = $S.NrGpu.Subsys
+            GameSubsys   = $S.GameGpu.Subsys
             GameGpuName  = $S.GameGpu.Name
             GameDeviceId = $S.GameGpu.DeviceId
             NrGpuName    = $S.NrGpu.Name
@@ -1253,7 +1275,7 @@ function Show-Page {
 
     7 {   # ---- 完成
         if ($S.Installed) {
-            Add-Title '安装完成 ✔' '接下来进游戏：设置里把上采样选成 XeSS，然后直接按 F10 就会出 NR 画面（不用先开菜单）'
+            Add-Title '安装完成 ✔' '接下来进游戏：设置里把上采样选成 XeSS，然后按 F10 开 NR（默认关；不用先开菜单）'
             Add-Text '已安装到：' 22 104 200 22 'White'
             Add-Text $S.GameDir 22 126 626 22 'LightGreen'
             Add-Text ('运行时      ：' + $S.RuntimeDone) 22 150 620 22 'Silver'
@@ -1261,6 +1283,7 @@ function Show-Page {
             Add-Text '  Del            参数菜单' 22 202 620 22
             Add-Text '  F10            神经降噪 开 / 关' 22 224 620 22
             Add-Text '  小键盘 1 / End  A 形态 ↔ B-4K 形态（NumLock 关闭；无小键盘者按 End）' 22 246 626 22
+            Add-Text '注意：Del 参数菜单只在 NR 开启时才会显示 —— 按 Del 没反应就先按 F10。' 22 380 626 24 'Goldenrod'
             Add-Text '生成的文件：' 22 266 300 22 'White'
             Add-Text '  AMD-CoGPU-使用说明.txt' 22 288 620 22 'Silver'
             Add-Text ('  ' + (Split-Path $S.ReportPath -Leaf)) 22 310 620 22 'Silver'
@@ -1298,7 +1321,20 @@ $next = {
     }
     if ($p -eq 3) {
         if (-not $script:State.GameGpu -or -not $script:State.NrGpu) { [System.Windows.Forms.MessageBox]::Show('请把两张卡都选上', '提示'); return }
-        if ($script:State.GameGpu.DeviceId -eq $script:State.NrGpu.DeviceId) { [System.Windows.Forms.MessageBox]::Show('游戏卡与神经卡不能是同一张', '提示'); return }
+        # 按"设备实例"判定，不按型号 DeviceId —— 同型号两张卡 DeviceId 相同，按 ID 比会把两张不同的卡误判成同一张
+        $gk = if ($script:State.GameGpu.PnpId) { $script:State.GameGpu.PnpId } else { "$($script:State.GameGpu.DeviceId)/$($script:State.GameGpu.Subsys)" }
+        $nk = if ($script:State.NrGpu.PnpId)   { $script:State.NrGpu.PnpId }   else { "$($script:State.NrGpu.DeviceId)/$($script:State.NrGpu.Subsys)" }
+        if ($gk -eq $nk) { [System.Windows.Forms.MessageBox]::Show("游戏卡与神经卡不能是同一张（同一设备实例）。`r`n`r`n若你确认插了两张卡：请到设备管理器确认第二张卡已启用、驱动正常。", '提示'); return }
+        if ($script:State.GameGpu.DeviceId -eq $script:State.NrGpu.DeviceId) {
+            if ($script:State.NrGpu.Subsys -and ($script:State.NrGpu.Subsys -ne $script:State.GameGpu.Subsys)) {
+                # 子型号不同 ⇒ 能精确区分，写 nr=sub: 即可，不必打扰用户
+                Write-Log ("两张卡 DeviceId 相同（0x{0}），已按子型号区分：游戏卡 SUBSYS_{1} / 神经卡 SUBSYS_{2}" -f $script:State.NrGpu.DeviceId, $script:State.GameGpu.Subsys, $script:State.NrGpu.Subsys)
+            } else {
+                # 连子型号都相同（同型号同板厂）⇒ 确实无法区分，只能提示
+                $r2 = [System.Windows.Forms.MessageBox]::Show(("注意：两张卡的 PCI DeviceId 与子型号都相同（都是 0x" + $script:State.NrGpu.DeviceId + "）。`r`n`r`n代理只能取【第一张匹配的卡】，可能不是你刚选的这张。`r`n`r`n若两张卡型号完全相同，用哪张做神经卡效果一致，可以继续。`r`n`r`n仍要继续吗？"), '同 DeviceId 提醒', 'YesNo', 'Warning')
+                if ($r2 -ne 'Yes') { return }
+            }
+        }
         if (-not (Test-Rdna4 $script:State.NrGpu.DeviceId)) {
             $r = [System.Windows.Forms.MessageBox]::Show("强烈建议神经卡使用 9000 系显卡。`r`n当前选择：$($script:State.NrGpu.Name)（DeviceId 0x$($script:State.NrGpu.DeviceId)）`r`n`r`n仍要继续吗？", '建议更换神经卡', 'YesNo', 'Warning')
             if ($r -ne 'Yes') { return }

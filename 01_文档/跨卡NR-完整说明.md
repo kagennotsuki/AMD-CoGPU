@@ -65,7 +65,7 @@ LmxxfNrRuntime.pak     NR 运行时资产（约 486 MB）
 
 | 键 | 作用 |
 |---|---|
-| **Del** | 打开/关闭参数菜单 |
+| **Del** | 打开/关闭参数菜单（**仅在 NR 开启时可见**：先按 F10） |
 | F10 | NR 总开关（关掉后完全走原版 XeSS）。**B 形态下直接生效，不需要先开菜单（c 版起）** |
 | 小键盘 1 / **End**（NumLock 关） | A 形态 ↔ B-4K 形态 热切换（写 `xess_proxy.bform.txt`，约 1 秒接手）。**没有小键盘的键盘直接按 End**，NumLock 关闭时它就是同一个键 |
 | ~~F2~F9 / F11~~ | 已停用，参数改在 Del 菜单里调 |
@@ -76,6 +76,9 @@ LmxxfNrRuntime.pak     NR 运行时资产（约 486 MB）
 
 菜单分三块：**画面（gain/limit/edge/sat/smooth）· 稳定性（temporal/motionLo/motionHi/motionAlpha/gateK）· 调试（jitterScale / 调试视图 / 直出 / 恢复默认）**。
 菜单可拖动、右下角可缩放、Del 关闭。
+
+> 菜单的绘制挂在 NR 的执行路径里，所以 **NR 关闭时按 Del 不会出现菜单**。
+> 想要调参数：先按 F10 开 NR，再按 Del。
 
 ## 6. 当前参数基线（已验证可用）
 
