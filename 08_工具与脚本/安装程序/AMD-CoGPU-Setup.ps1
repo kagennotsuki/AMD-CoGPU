@@ -25,6 +25,7 @@
     [string]$InstallTo,           # 无界面安装到指定目录（测试/批量用）
     [string]$RuntimeMode = 'auto', # auto | download | skip
     [string]$NrDev = '7550',
+    [string]$GameDev = '744C',     # 无界面安装时的"游戏卡" DeviceId（十六进制，如 744C）
     [string]$Bform = '0',
     [string]$Proxy,                      # 可选：显式指定代理，如 http://127.0.0.1:7890
     [switch]$UiSmokeTest           # 界面冒烟测试：逐页构建并戳控件，验证事件处理不炸
@@ -85,10 +86,15 @@ function Get-Gpus {
         if ($v.PNPDeviceID) { $parts = $v.PNPDeviceID -split '\\'; $inst = $parts[$parts.Count - 1] }
         $sub = ''
         if ($v.PNPDeviceID -match 'SUBSYS_([0-9A-Fa-f]{4})') { $sub = $Matches[1].ToUpper() }
+        $ven = 0; if ($v.PNPDeviceID -match 'VEN_([0-9A-Fa-f]{4})') { $ven = [Convert]::ToInt32($Matches[1], 16) }
+        $subsysFull = 0
+        if ($v.PNPDeviceID -match 'SUBSYS_([0-9A-Fa-f]{8})') { $subsysFull = [Convert]::ToUInt32($Matches[1], 16) }
         $out += [pscustomobject]@{
             Name     = $v.Name
             DeviceId = $dev
             Subsys   = $sub
+            VendorId = $ven
+            SubSysId = $subsysFull
             PnpId    = [string]$v.PNPDeviceID
             Inst     = $inst
             Vendor   = if ($isAmd) { 'AMD' } else { '其他' }
@@ -104,6 +110,155 @@ function Test-Rdna4([string]$deviceId) {
     # 9000 系（RDNA4 / Navi48 等）的 PCI DeviceId 目前落在 0x75xx 段
     if ($deviceId -match '^75[0-9A-F]{2}$') { return $true }
     return $false
+}
+
+function Set-GameRenderAdapter {
+    <#
+      把"游戏用哪张卡"写进游戏自己的配置（RE Engine 的 [Render/Adapter] 段）。
+      为什么需要：游戏跑哪张卡由游戏配置决定，不是安装器能"顺带"影响的。
+      实测：RE4 的 local_config.ini 写的是 DeviceId=30032(0x7550) = 神经卡，
+            结果游戏与神经卡同卡 ⇒ 跨卡管线不成立 ⇒ 一按 F10 就崩。
+    #>
+    param([string]$GameDir, $Gpu)
+
+    if (-not $GameDir -or -not $Gpu) { return $null }
+    if (-not $Gpu.DeviceId) { return $null }
+
+    # 1) 找配置文件
+    $cfg = $null
+    foreach ($c in @('local_config.ini', 're2_config.ini', 're3_config.ini', 're8_config.ini', 're7_config.ini')) {
+        $p = Join-Path $GameDir $c
+        if (Test-Path $p) { $cfg = $p; break }
+    }
+    if (-not $cfg) {
+        $any = Get-ChildItem $GameDir -File -Filter '*_config.ini' -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($any) { $cfg = $any.FullName }
+    }
+    if (-not $cfg) { Write-Log '未找到游戏配置文件（local_config.ini / *_config.ini），跳过“游戏卡”写入' 'WARN'; return $null }
+
+    # 2) 读（保留原编码）
+    $bytes = [System.IO.File]::ReadAllBytes($cfg)
+    $isUtf16 = ($bytes.Length -ge 2 -and $bytes[0] -eq 0xFF -and $bytes[1] -eq 0xFE)
+    $enc = if ($isUtf16) { [System.Text.Encoding]::Unicode } else { New-Object System.Text.UTF8Encoding($false) }
+    $text = $enc.GetString($bytes)
+    $lines = $text -split "`r`n"
+    if ($lines.Count -le 1) { $lines = $text -split "`n" }
+
+    # 3) 定位 [Render/Adapter] 段
+    $start = -1
+    for ($i = 0; $i -lt $lines.Count; $i++) {
+        if ($lines[$i].Trim() -eq '[Render/Adapter]') { $start = $i; break }
+    }
+    $values = [ordered]@{
+        'Description' = $Gpu.Name
+        'VendorId'    = [string]$Gpu.VendorId
+        'DeviceId'    = [string]([Convert]::ToInt32($Gpu.DeviceId, 16))
+        'SubSysId'    = [string]$Gpu.SubSysId
+    }
+
+    if ($start -lt 0) {
+        # 段不存在 → 追加到末尾
+        $lines += ''
+        $lines += '[Render/Adapter]'
+        foreach ($k in $values.Keys) { $lines += ('{0}={1}' -f $k, $values[$k]) }
+        Write-Log '配置文件里没有 [Render/Adapter] 段 → 已追加' 'WARN'
+    } else {
+        # 段内逐键改写（到下一个 [ 为止）
+        $seen = @{}
+        for ($i = $start + 1; $i -lt $lines.Count; $i++) {
+            $ln = $lines[$i]
+            if ($ln.TrimStart().StartsWith('[')) { break }
+            if ($ln -match '^([A-Za-z0-9_]+)=(.*)$') {
+                $k = $Matches[1]
+                if ($values.Contains($k)) { $lines[$i] = ('{0}={1}' -f $k, $values[$k]); $seen[$k] = $true }
+            }
+        }
+        foreach ($k in $values.Keys) {
+            if (-not $seen.ContainsKey($k)) {
+                $insertAt = $start + 1 + $seen.Count
+                $lines = @($lines[0..($insertAt - 1)]) + @(('{0}={1}' -f $k, $values[$k])) + @($lines[$insertAt..($lines.Count - 1)])
+                $seen[$k] = $true
+            }
+        }
+    }
+
+    # 4) 备份 + 写回
+    $bak = $cfg + '.bak-adapter-' + (Get-Date -Format 'yyyyMMdd-HHmmss')
+    Copy-Item $cfg $bak -Force
+    $outText = ($lines -join "`r`n")
+    [System.IO.File]::WriteAllText($cfg, $outText, $enc)
+
+    Write-Log ("游戏卡已写入 {0}：[Render/Adapter] {1} / DeviceId={2} / SubSysId={3}" -f
+        (Split-Path $cfg -Leaf), $Gpu.Name, ([Convert]::ToInt32($Gpu.DeviceId, 16)), $Gpu.SubSysId) 'OK'
+
+    # ---- 同时写 Windows 的"每程序 GPU 偏好"（HKCU，用户级，可回退）----
+    # 说明：注册表只有 GpuPreference=1(省电) / 2(高性能) 两档，**不能点名具体适配器**，
+    #       实际映射由 Windows 决定。它不能替代游戏配置，只是让系统默认也倾向同一侧。
+    #       实测（本机）：=1 → 7900 XT，=2 → 9070 XT。
+    $regWritten = $null; $regOld = $null
+    try {
+        $exe = Get-ChildItem $GameDir -File -Filter '*.exe' -ErrorAction SilentlyContinue |
+               Where-Object { $_.BaseName -notmatch '^(CrashReport|InstallerMessage|unins\d*|setup|install|vc_?redist|dxsetup)$' } |
+               Sort-Object Length -Descending | Select-Object -First 1
+        if ($exe) {
+            $rk = 'HKCU:\Software\Microsoft\DirectX\UserGpuPreferences'
+            if (-not (Test-Path $rk)) { New-Item -Path $rk -Force | Out-Null }
+            $regOld = (Get-ItemProperty -Path $rk -Name $exe.FullName -ErrorAction SilentlyContinue).($exe.FullName)
+            Set-ItemProperty -Path $rk -Name $exe.FullName -Value 'GpuPreference=1;' -Force
+            $regWritten = $exe.FullName
+            Write-Log ("已写 Windows 图形偏好：{0} → GpuPreference=1（原值：{1}）" -f $exe.Name, $(if ($regOld) { $regOld } else { '(无)' })) 'OK'
+        }
+    } catch { Write-Log ('写 Windows 图形偏好失败（不影响主流程）：' + $_.Exception.Message) 'WARN' }
+
+    return [pscustomobject]@{ File = $cfg; Backup = $bak; Gpu = $Gpu.Name; RegExe = $regWritten; RegOld = $regOld }
+}
+
+function Test-CardsWritten {
+    <#
+      回读验证：两张卡是否真的落地了。
+        游戏卡 → 游戏配置 [Render/Adapter] 的 DeviceId，以及 Windows 图形偏好
+        神经卡 → xess_proxy.gpu.txt 的 nr=dev: / nr=sub:
+    #>
+    param([string]$GameDir, $GameGpu, [string]$NrDev, [string]$NrSubsys)
+
+    $out = [ordered]@{ GameOk = $null; GameWrote = $null; RegOk = $null; NrOk = $null; NrWrote = $null }
+
+    # 游戏卡：读配置
+    $cfg = $null
+    foreach ($c in @('local_config.ini', 're2_config.ini', 're3_config.ini', 're8_config.ini', 're7_config.ini')) {
+        $p = Join-Path $GameDir $c
+        if (Test-Path $p) { $cfg = $p; break }
+    }
+    if ($cfg -and $GameGpu) {
+        $bytes = [System.IO.File]::ReadAllBytes($cfg)
+        $isU16 = ($bytes.Length -ge 2 -and $bytes[0] -eq 0xFF -and $bytes[1] -eq 0xFE)
+        $txt = if ($isU16) { [System.Text.Encoding]::Unicode.GetString($bytes) } else { [System.Text.Encoding]::UTF8.GetString($bytes) }
+        $want = [Convert]::ToInt32($GameGpu.DeviceId, 16)
+        if ($txt -match '(?m)^\s*DeviceId=(\d+)\s*$') {
+            $out.GameWrote = [int]$Matches[1]
+            $out.GameOk = ($out.GameWrote -eq $want)
+        } else { $out.GameOk = $false }
+    }
+
+    # 游戏卡：读注册表
+    try {
+        $exe = Get-ChildItem $GameDir -File -Filter '*.exe' -ErrorAction SilentlyContinue |
+               Where-Object { $_.BaseName -notmatch '^(CrashReport|InstallerMessage|unins\d*|setup|install|vc_?redist|dxsetup)$' } |
+               Sort-Object Length -Descending | Select-Object -First 1
+        if ($exe) {
+            $v = (Get-ItemProperty 'HKCU:\Software\Microsoft\DirectX\UserGpuPreferences' -Name $exe.FullName -ErrorAction SilentlyContinue).($exe.FullName)
+            if ($v) { $out.RegOk = ($v -match 'GpuPreference=1') }
+        }
+    } catch { }
+
+    # 神经卡：读 gpu.txt
+    $gp = Join-Path $GameDir 'xess_proxy.gpu.txt'
+    if (Test-Path $gp) {
+        $out.NrWrote = (Get-Content $gp -Raw).Trim()
+        $out.NrOk = ($out.NrWrote -match [regex]::Escape($NrDev))
+    } else { $out.NrOk = $false }
+
+    return [pscustomobject]$out
 }
 
 function Test-GameDir([string]$dir) {
@@ -149,9 +304,29 @@ function Test-ComponentPresent {
 }
 
 function Test-RuntimePresent([string]$dir) {
-    $comps = Get-RuntimeComponents
-    if ($comps.Count -eq 0) { return $false }
-    foreach ($c in $comps) { if (-not (Test-ComponentPresent -Comp $c -Dir $dir)) { return $false } }
+    # 只看功能必需项；licenses 缺失不影响"能不能跑"（见 Test-RuntimeUsable 注释）
+    if (-not (Test-RuntimeUsable $dir)) { return $false }
+    # 顺手提示缺 licenses（不拦）
+    foreach ($lic in @('licenses\lmxxf_LICENSE.txt', 'licenses\AMDNR_RDNA3_BACKEND.txt')) {
+        if (-not (Test-Path (Join-Path $dir $lic))) {
+            Write-Log ("提示：运行时齐备，但缺第三方许可原文 {0}（不影响运行；发布包内应带）" -f $lic) 'WARN'
+            break
+        }
+    }
+    return $true
+}
+
+function Test-RuntimeUsable([string]$dir) {
+    <#
+      "运行时能不能用"只看功能必需项：LmxxfNrRuntime.dll / .pak / dlssnr-amd。
+      为什么不看 licenses\：那是纯文档（MIT 原文），payload\runtime 里本来就没有，
+      用打包时才补进去。以前把它算进判定 ⇒ 手动解压的运行时永远"缺 2 项"、
+      子目录也识别不出来（实测 RE4\runtime\ 就是这样被漏掉的）。
+    #>
+    if ([string]::IsNullOrWhiteSpace($dir) -or -not (Test-Path $dir)) { return $false }
+    foreach ($n in @('LmxxfNrRuntime.dll', 'LmxxfNrRuntime.pak', 'dlssnr-amd')) {
+        if (-not (Test-Path (Join-Path $dir $n))) { return $false }
+    }
     return $true
 }
 
@@ -165,8 +340,7 @@ function Find-RuntimeDir([string]$dir) {
     if ($comps.Count -eq 0) { return $null }
     $allHere = {
         param($d)
-        foreach ($c in $comps) { if (-not (Test-ComponentPresent -Comp $c -Dir $d)) { return $false } }
-        return $true
+        return (Test-RuntimeUsable $d)
     }
     if (& $allHere $dir) { return $dir }
     $lv1 = @(Get-ChildItem $dir -Directory -ErrorAction SilentlyContinue)
@@ -636,7 +810,7 @@ function New-UsageDoc {
   旧版的 F2~F8 / F11 单键已停用。
 
 【启动前检查】
-  1. 游戏目录里的 libxess.dll 必须是本安装器装的（0.1.2 版为 814,080 字节）
+  1. 游戏目录里的 libxess.dll 必须是本安装器装的（当前版为 814,080 字节；安装版本见本文件末行）
   2. 神经卡（默认 RX 9070 XT）要能被系统识别，且不要被其它程序独占
   3. NR 默认关：进游戏后按一次 F10 开启（网络已在加载阶段预建，按下即出画面，不必等待）；
      想看参数菜单要先开 NR（Del 菜单只在 NR 开启时绘制）。
@@ -780,12 +954,29 @@ if ($InstallTo) {
         Bform        = $Bform
         QueueHook    = '1'
         NrDeviceId   = $NrDev
+        # 神经卡子型号：同 DeviceId 双卡（9070 XT / 9070 GRE 都报 0x7550）靠它区分；
+        # 不传就只能写 nr=dev:，会落到"第一张匹配的卡"，可能装错。
+        NrSubsys     = $((Get-Gpus | Where-Object { $_.DeviceId -eq $NrDev } | Select-Object -First 1).Subsys)
         GameGpuName  = 'Headless-Render'
-        GameDeviceId = '744C'
+        GameDeviceId = $GameDev
         NrGpuName    = 'Headless-NR'
     }
     Write-Host '[2] 安装代理与配置…'
     $items = Invoke-Install -Plan $plan
+
+    # ★ 同上：把游戏卡写进游戏配置（无界面模式按 DeviceId 反查显卡对象）
+    try {
+        $gpObj = Get-Gpus | Where-Object { $_.DeviceId -eq $plan.GameDeviceId } | Select-Object -First 1
+        if ($gpObj) {
+            $ev = Set-GameRenderAdapter -GameDir $InstallTo -Gpu $gpObj
+            if ($ev) { Write-Host ("    [2b] 游戏卡已写入：" + (Split-Path $ev.File -Leaf) + " → " + $ev.Gpu) }
+            $nrSub = ($gpObj.Subsys)
+            $chk = Test-CardsWritten -GameDir $InstallTo -GameGpu $gpObj -NrDev $plan.NrDeviceId -NrSubsys $nrSub
+            $mark = { param($b) if ($b -eq $true) { '✔' } elseif ($b -eq $false) { '✘' } else { '–' } }
+            Write-Host ("    [2c] 回读验证：游戏配置 DeviceId={0} {1} | 注册表偏好 {2} | 神经卡 {3} {4}" -f
+                $chk.GameWrote, (& $mark $chk.GameOk), (& $mark $chk.RegOk), $chk.NrWrote, (& $mark $chk.NrOk))
+        } else { Write-Host "    [2b] 未找到 DeviceId=$($plan.GameDeviceId) 的显卡，跳过写游戏卡" }
+    } catch { Write-Host ("    [2b] 写游戏卡失败：" + $_.Exception.Message) }
 
     Write-Host ("[3] 运行时（模式 {0}）…" -f $RuntimeMode)
     $rt = Install-RuntimeComponents -GameDir $InstallTo -Mode $RuntimeMode -OnProgress {
@@ -1191,11 +1382,34 @@ function Show-Page {
             hasUp    = ($comps.Count -gt 0 -and $comps[0].url -and $comps[0].url -notlike '*<*')
             hasPresent = $present
         }
-        $p6.upd = { param($c) $c.btn.Enabled = ($c.skip.Checked -or $c.hasLocal -or $c.hasSelf -or $c.hasUp -or $c.hasPresent) }
+        # ★ 不再用"有没有下载源"来决定能否点下一步：
+        #   三个选项都是合法选择，网络问题应该在安装阶段报明确错误，而不是把用户堵在页面上。
+        #   （历史问题：某台机器上 hasSelf/hasUp 判为 false ⇒ 只勾"跳过"才能走，用户以为页面坏了。）
+        $p6.upd = { param($c) $c.btn.Enabled = $true }
         $rAuto.Add_CheckedChanged(({ if ($rAuto.Checked) { $S.RuntimeMode = 'auto'; & $p6.upd $p6 } }).GetNewClosure())
         $rDl.Add_CheckedChanged(({   if ($rDl.Checked)   { $S.RuntimeMode = 'download'; & $p6.upd $p6 } }).GetNewClosure())
         $rSkip.Add_CheckedChanged(({ if ($rSkip.Checked) { $S.RuntimeMode = 'skip'; & $p6.upd $p6 } }).GetNewClosure())
         & $p6.upd $p6
+        # 诊断（临时）：把第 6 页的判定状态落一份，便于排查"按钮为什么是灰的"
+        try {
+            $diag = @(
+                ('time      = ' + (Get-Date -Format 'yyyy-MM-dd HH:mm:ss')),
+                ('version   = ' + $script:Version),
+                ('gameDir   = ' + $S.GameDir),
+                ('comps     = ' + $comps.Count),
+                ('hasLocal  = ' + $p6.hasLocal),
+                ('hasSelf   = ' + $p6.hasSelf),
+                ('hasUp     = ' + $p6.hasUp),
+                ('hasPresent= ' + $p6.hasPresent),
+                ('present   = ' + $present),
+                ('rtDir     = ' + $rtDir),
+                ('mode      = ' + $S.RuntimeMode),
+                ('btnEnabled= ' + $btnNext.Enabled),
+                ('selfUrl   = ' + $(if ($comps.Count -gt 0 -and $comps[0].selfHosted) { $comps[0].selfHosted.url } else { '(无)' })),
+                ('upUrl     = ' + $(if ($comps.Count -gt 0) { $comps[0].url } else { '(无)' }))
+            )
+            Set-Content -Path (Join-Path $env:TEMP 'cogpu-page5.txt') -Value ($diag -join "`r`n") -Encoding UTF8
+        } catch { }
 
 
         Add-Text '运行时包含：mochizuki / lmxxf 运行时 DLL、模型 pak（约 486MB）与 dlssnr-amd 模型目录' 22 254 626 22 'Gray'
@@ -1247,6 +1461,22 @@ function Show-Page {
             foreach ($en in $exeNames) { if (Get-Process -Name $en -ErrorAction SilentlyContinue) { $running += $en } }
             if ($running.Count -gt 0) { throw ("检测到游戏正在运行（{0}），请先完全退出游戏再安装" -f ($running -join ', ')) }
             $items = Invoke-Install -Plan $plan
+
+            # ★ 把"游戏用哪张卡"写进游戏配置（+ Windows 图形偏好）
+            #   否则游戏可能跑在神经卡上 ⇒ 同卡 ⇒ 跨卡管线不成立（实测 RE4 一按 F10 就崩）
+            try {
+                $ev = Set-GameRenderAdapter -GameDir $plan.GameDir -Gpu $S.GameGpu
+                if ($ev) {
+                    $items += [pscustomobject]@{ Action = '游戏卡'; File = (Split-Path $ev.File -Leaf); Note = ('[Render/Adapter] → ' + $ev.Gpu) }
+                    $chk = Test-CardsWritten -GameDir $plan.GameDir -GameGpu $S.GameGpu -NrDev $plan.NrDeviceId -NrSubsys $S.NrGpu.Subsys
+                    Write-Log ("回读验证：游戏配置 DeviceId={0}（{1}） · 注册表偏好 {2} · 神经卡文件 {3}（{4}）" -f
+                        $chk.GameWrote,
+                        $(if ($chk.GameOk -eq $true) { 'OK' } else { '不符' }),
+                        $(if ($chk.RegOk -eq $true) { 'OK' } else { '未设' }),
+                        $chk.NrWrote,
+                        $(if ($chk.NrOk -eq $true) { 'OK' } else { '不符' })) $(if ($chk.GameOk -eq $true -and $chk.NrOk -eq $true) { 'OK' } else { 'WARN' })
+                }
+            } catch { Write-Log ('写游戏卡失败：' + $_.Exception.Message) 'WARN' }
 
             # ---- 运行时：逐个组件（已有就跳过；没有就按清单来源下载）----
             $comps = Get-RuntimeComponents
@@ -1457,11 +1687,14 @@ if ($UiSmokeTest) {
             if ($pg -eq 5) {
                 $radios = @($body.Controls | Where-Object { $_ -is [System.Windows.Forms.RadioButton] })
                 if ($radios.Count -eq 3) {
+                    # ★ 先记录"页面刚构建完、默认选自动"的状态 —— 这才是用户进门看到的样子
+                    $autoOk = $btnNext.Enabled
                     $radios[2].Checked = $true   # 选"跳过"
                     $skipOk = $btnNext.Enabled
                     $radios[1].Checked = $true   # 选"强制下载"
                     $dlOk = $btnNext.Enabled
-                    Write-Host ("    P2: 选跳过→下一步={0}  选强制下载→下一步={1}" -f $skipOk, $dlOk) -ForegroundColor DarkGray
+                    Write-Host ("    P2: 默认(自动)→下一步={0}  选跳过→{1}  选强制下载→{2}" -f $autoOk, $skipOk, $dlOk) -ForegroundColor DarkGray
+                    if (-not $autoOk) { Write-Host '    X P2 未修复：默认选中"自动"时"下一步"是灰的（用户只能选跳过）' -ForegroundColor Red; $fail++ }
                     if (-not $skipOk) { Write-Host '    X P2 未修复：选"跳过"时"下一步"仍不可用' -ForegroundColor Red; $fail++ }
                 } else { Write-Host ("    X 第6页单选数量异常：{0}" -f $radios.Count) -ForegroundColor Red; $fail++ }
             }

@@ -46,8 +46,7 @@ static const char* kNames[72] = {
 
 static HMODULE g_self = nullptr, g_real = nullptr;
 static FILE* g_log = nullptr;
-static volatile bool g_nrOn = false;   // ★ 默认【关】：进游戏先给原生画面，按 F10 才开 NR
-                                       //   （网络在加载阶段已预建，所以第一次按 F10 立即出画面，不必等约 0.9 秒）
+static volatile bool g_nrOn = true;    // ★ 默认开启；想默认关：游戏目录放 xess_proxy.nr.txt 写 0
 static bool g_disabled = false;
 static ComPtr<ID3D12Resource> g_fedTex[8];   // ≥ K（K 上限 8）
 // （SRV 槽位映射见 K 声明之后的 kSrv* 常量）
@@ -4100,14 +4099,20 @@ static void XAdapterInit() {
     const UINT64 PAY = 1920ull * 1080ull * 4ull;
     bool a = MakeXBuf(PAY, "颜色进", g_xHeapIn,  g_xBufIn,  g_xHeapInW,  g_xBufInW);
     bool b = MakeXBuf(XHDR + PAY * (UINT64)K, "答案出(K段)", g_xHeapOut, g_xBufOut, g_xHeapOutW, g_xBufOutW);
-    HRESULT h1 = g_dev->CreateFence(0, D3D12_FENCE_FLAG_SHARED, IID_PPV_ARGS(g_xFence.GetAddressOf()));
+    // ★ 跨卡 fence 必须同时带 SHARED_CROSS_ADAPTER：只给 SHARED 时，在对端适配器上
+    //   OpenSharedHandle 会返回 E_INVALIDARG(0x80070057)，跨卡通路实际不可用。
+    HRESULT h1 = g_dev->CreateFence(0, D3D12_FENCE_FLAG_SHARED | D3D12_FENCE_FLAG_SHARED_CROSS_ADAPTER,
+                                    IID_PPV_ARGS(g_xFence.GetAddressOf()));
     HRESULT h2 = E_FAIL, h3 = E_FAIL;
     if (SUCCEEDED(h1)) {
         HANDLE sh = nullptr;
         h2 = g_dev->CreateSharedHandle(g_xFence.Get(), nullptr, GENERIC_ALL, nullptr, &sh);
         if (SUCCEEDED(h2)) { h3 = g_worker.dev->OpenSharedHandle(sh, IID_PPV_ARGS(g_xFenceW.GetAddressOf())); CloseHandle(sh); }
     }
-    g_xOk = a && b;
+    // ★ 必须把 fence 结果也算进来：跨卡 fence 打不开时，后面用到 g_xFenceW（空指针）会闪退
+    //   （实测 RE4：worker打开=0x80070057 → 一按 F10 就崩）
+    g_xOk = a && b && SUCCEEDED(h1) && SUCCEEDED(h2) && SUCCEEDED(h3);
+    if (!g_xOk && a && b) Log("R2: 跨卡共享 fence 打不开（0x%08X）→ 跨卡不可用，本次会话禁用 NR", (unsigned)h3);
     Log("R2 结果: buffer=%d 共享fence 建=0x%08X 导出=0x%08X worker打开=0x%08X", (int)g_xOk, (unsigned)h1, (unsigned)h2, (unsigned)h3);
     // S5-4：本地中转 buffer（普通 buffer 才能建 SRV）
     if (g_xOk && g_heap) {
@@ -4290,11 +4295,10 @@ extern "C" int ProxyExecute(void* ctx, void* cmdList, const void* params) {
     using Fn = int(*)(void*, void*, const void*);
     Fn real = (Fn)g_xessTab[30];
     if (!params || !cmdList) return real ? real(ctx, cmdList, params) : -1;
-    if (g_disabled) {
-        BformPresentShow(false);
+    if (g_disabled || !g_nrOn) {
+        BformPresentShow(false);   // NR 关掉 → 先卸覆盖层，否则会留一张冻结的 B 画面（F10 "像没生效"）
         return real ? real(ctx, cmdList, params) : -1;
     }
-    // 注：NR 关闭时【不再】在这里早退 —— 见下面"预建网络"的说明。
 
     // ★ 启动时自动载入用户存档（xess_proxy.saved.ini）
     //   以前只有菜单里的「恢复上次保存」会读它 → 每次启动都退回代码默认值，
@@ -4399,17 +4403,6 @@ extern "C" int ProxyExecute(void* ctx, void* cmdList, const void* params) {
         g_worker.th = std::thread(WorkerMain);
         inited = true;
         Log("初始化完成（方案 B：槽位%d / 喂帧滞后%d / 呈现延迟%d / 余量%d 帧）", K, kFeedLag, (int)g_kDelay, (int)g_kDelay - kFeedLag);
-    }
-
-    // ★ 预建网络（解决"第一次按 F10 要等约 0.9 秒"）：
-    //   初始化上面已经跑完（含 WorkerCreateSession → 运行时开始建网络），即使 NR 关着也先建好。
-    //   实测证据：默认关时，首次开 NR 的日志出现 "建网络等待结束（等了 9×100ms）" + "#1 911.2 ms"，
-    //   期间没有任何答案 ⇒ 不合成 ⇒ 画面不变，用户以为没生效就会再按一次（反而关掉）。
-    //   现在网络在加载阶段就建，进游戏后按 F10 即刻出画面。
-    if (!g_nrOn) {
-        // 默认就是这条路：网络已预建，但用户还没按 F10 ⇒ 本帧走原生，不合成、不留覆盖层
-        BformPresentShow(false);
-        return real ? real(ctx, cmdList, params) : -1;
     }
 
     auto tA = Clock::now();
