@@ -37,7 +37,7 @@ Add-Type -AssemblyName System.Windows.Forms, System.Drawing
 
 $script:Root     = Split-Path -Parent $MyInvocation.MyCommand.Path
 $script:Payload  = Join-Path $script:Root 'payload'
-$script:Version  = '0.1.2'
+$script:Version  = '0.1.3'
 $script:HttpProxy = $Proxy
 $script:AppName  = 'AMD CoGPU'
 
@@ -153,6 +153,51 @@ function Test-RuntimePresent([string]$dir) {
     if ($comps.Count -eq 0) { return $false }
     foreach ($c in $comps) { if (-not (Test-ComponentPresent -Comp $c -Dir $dir)) { return $false } }
     return $true
+}
+
+function Find-RuntimeDir([string]$dir) {
+    # 返回"运行时实际所在目录"：先看游戏根目录，再向下探 1~2 层。
+    # 为什么探子目录：用户手动解压 runtime.zip 时，Windows 默认多建一层文件夹，
+    # 文件就落在 游戏目录\runtime\ 下；而旧检查只看根目录 ⇒ 永远报"没有运行时"，
+    # 于是第 6 步只能选跳过、第 7 步装完还是提示缺运行时（实测用户反馈）。
+    if ([string]::IsNullOrWhiteSpace($dir) -or -not (Test-Path $dir)) { return $null }
+    $comps = Get-RuntimeComponents
+    if ($comps.Count -eq 0) { return $null }
+    $allHere = {
+        param($d)
+        foreach ($c in $comps) { if (-not (Test-ComponentPresent -Comp $c -Dir $d)) { return $false } }
+        return $true
+    }
+    if (& $allHere $dir) { return $dir }
+    $lv1 = @(Get-ChildItem $dir -Directory -ErrorAction SilentlyContinue)
+    foreach ($d1 in $lv1) { if (& $allHere $d1.FullName) { return $d1.FullName } }
+    foreach ($d1 in $lv1) {
+        foreach ($d2 in @(Get-ChildItem $d1.FullName -Directory -ErrorAction SilentlyContinue)) {
+            if (& $allHere $d2.FullName) { return $d2.FullName }
+        }
+    }
+    return $null
+}
+
+function Repair-RuntimeSubdir([string]$dir) {
+    # 把"解压成子目录"的运行时整理到游戏根目录（原目录保留）。返回整理的文件数。
+    # 为什么需要：用户手动解压 runtime.zip 后文件在 runtime\ 下，代理只认游戏根目录
+    # ⇒ 不整理的话，第 7 步会一直提示缺运行时，代理也起不来。
+    $rtDir = Find-RuntimeDir $dir
+    if (-not $rtDir -or ($rtDir -eq $dir)) { return 0 }
+    if ([string]::IsNullOrWhiteSpace($dir) -or -not (Test-Path $dir)) { return 0 }
+    Write-Log ("检测到运行时在子目录 [" + (Split-Path $rtDir -Leaf) + "] → 整理到游戏根目录…")
+    $moved = 0
+    foreach ($f in @(Get-ChildItem $rtDir -Recurse -File -ErrorAction SilentlyContinue)) {
+        $rel = $f.FullName.Substring($rtDir.Length).TrimStart('\')
+        $dst = Join-Path $dir $rel
+        $dd  = Split-Path $dst -Parent
+        if (-not (Test-Path $dd)) { New-Item -ItemType Directory -Path $dd -Force | Out-Null }
+        try { Copy-Item $f.FullName $dst -Force -ErrorAction Stop; $moved++ }
+        catch { Write-Log ("  复制失败：{0} — {1}" -f $rel, $_.Exception.Message) 'WARN' }
+    }
+    Write-Log ("已整理 {0} 个文件到游戏根目录（子目录可自行删除）" -f $moved) 'OK'
+    return $moved
 }
 
 function Get-ProxyUrl {
@@ -416,7 +461,16 @@ function Install-RuntimeComponents {
     $comps = Get-RuntimeComponents
     $localRt = Join-Path $script:Payload 'runtime'
     $done = @()
-    if ($Mode -eq 'skip') { Write-Log '按用户选择：跳过运行时'; return @{ Done = '跳过'; Items = @() } }
+
+    # ★ 与界面版一致：先把"解压成子目录"的运行时整理到游戏根目录
+    Repair-RuntimeSubdir $GameDir
+
+    if ($Mode -eq 'skip') {
+        Write-Log '按用户选择：跳过运行时'
+        if (Test-RuntimePresent $GameDir) { return @{ Done = '跳过（游戏目录已有运行时）'; Items = @() } }
+        Write-Log '⚠ 已跳过运行时，但游戏目录里没有检测到运行时文件 —— 代理会起不来' 'WARN'
+        return @{ Done = '跳过（未检测到运行时！）'; Items = @() }
+    }
     if ($comps.Count -eq 0) { Write-Log '清单里没有运行时组件，跳过' 'WARN'; return @{ Done = '清单为空'; Items = @() } }
     foreach ($c in $comps) {
         $present = Test-ComponentPresent -Comp $c -Dir $GameDir
@@ -1087,11 +1141,17 @@ function Show-Page {
 
     5 {   # ---- 运行时（别人的做法：用时从仓库下载）
         Add-Title '第 6 步 · 运行时（神经网络降噪后端）' '运行时约 900MB，不放进安装包，安装时从仓库下载'
-        $present = Test-RuntimePresent $S.GameDir
+        $rtDir = Find-RuntimeDir $S.GameDir
+        $present = [bool]$rtDir
+        $rtNested = ($present -and ($rtDir -ne $S.GameDir))
         $comps = Get-RuntimeComponents
         $info = Add-Text '' 22 104 626 44 'Silver' -Return
         if ($present) {
-            $info.Text = '✔ 目标目录里已经检测到运行时，可以跳过下载。'
+            if ($rtNested) {
+                $info.Text = ('✔ 检测到运行时（在子目录 ' + (Split-Path $rtDir -Leaf) + '\ 里）：安装时会自动整理到游戏根目录，可放心选"自动"。')
+            } else {
+                $info.Text = '✔ 目标目录里已经检测到运行时，可以跳过下载。'
+            }
             $info.ForeColor = [System.Drawing.Color]::LightGreen
         } elseif ($comps.Count -eq 0) {
             $info.Text = '✘ 清单里没有运行时组件，无法下载运行时。'
@@ -1129,8 +1189,9 @@ function Show-Page {
             hasLocal = (Test-Path $localRtPath)
             hasSelf  = ($comps.Count -gt 0 -and $comps[0].selfHosted -and $comps[0].selfHosted.url -and $comps[0].selfHosted.url -notlike '*<*')
             hasUp    = ($comps.Count -gt 0 -and $comps[0].url -and $comps[0].url -notlike '*<*')
+            hasPresent = $present
         }
-        $p6.upd = { param($c) $c.btn.Enabled = ($c.skip.Checked -or $c.hasLocal -or $c.hasSelf -or $c.hasUp) }
+        $p6.upd = { param($c) $c.btn.Enabled = ($c.skip.Checked -or $c.hasLocal -or $c.hasSelf -or $c.hasUp -or $c.hasPresent) }
         $rAuto.Add_CheckedChanged(({ if ($rAuto.Checked) { $S.RuntimeMode = 'auto'; & $p6.upd $p6 } }).GetNewClosure())
         $rDl.Add_CheckedChanged(({   if ($rDl.Checked)   { $S.RuntimeMode = 'download'; & $p6.upd $p6 } }).GetNewClosure())
         $rSkip.Add_CheckedChanged(({ if ($rSkip.Checked) { $S.RuntimeMode = 'skip'; & $p6.upd $p6 } }).GetNewClosure())
@@ -1190,11 +1251,22 @@ function Show-Page {
             # ---- 运行时：逐个组件（已有就跳过；没有就按清单来源下载）----
             $comps = Get-RuntimeComponents
             $localRt = Join-Path $script:Payload 'runtime'
+
+            # ★ 整理"解压成子目录"的情况：把 游戏目录\runtime\ 里的内容搬到游戏根目录。
+            #   实测用户手动解压后文件在 runtime\ 子目录，旧检查只看根目录 ⇒ 一直报缺运行时。
+            Repair-RuntimeSubdir $plan.GameDir
+
             $doneList = @()
             if ($S.RuntimeMode -eq 'skip') {
                 Write-Log '按用户选择：跳过运行时'
-                $S.RuntimeDone = '跳过'
-                $items += [pscustomobject]@{ Action = '运行时'; File = '(跳过)'; Note = '用户选择跳过' }
+                if (Test-RuntimePresent $plan.GameDir) {
+                    $S.RuntimeDone = '跳过（游戏目录已有运行时）'
+                    $items += [pscustomobject]@{ Action = '运行时'; File = '(跳过)'; Note = '用户选择跳过；已检测到运行时' }
+                } else {
+                    Write-Log '⚠ 已跳过运行时，但游戏目录里没有检测到运行时文件（缺 LmxxfNrRuntime.dll / .pak / dlssnr-amd）——代理会起不来' 'WARN'
+                    $S.RuntimeDone = '跳过（未检测到运行时！）'
+                    $items += [pscustomobject]@{ Action = '运行时'; File = '(跳过)'; Note = '用户选择跳过；未检测到运行时，可能无法工作' }
+                }
             } elseif ($comps.Count -eq 0) {
                 Write-Log '清单里没有运行时组件，跳过' 'WARN'
                 $S.RuntimeDone = '清单为空'
